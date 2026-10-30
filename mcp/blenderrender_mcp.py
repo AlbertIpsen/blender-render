@@ -3,7 +3,8 @@
 
 Jobs go straight into the PC's render queue (remote/pc/rq.py), so they show up in the BlenderRender
 Mac app like ones dropped there: the app shows progress and time left and posts the "Render done"
-notification. Uses the app's own settings (~/Library/Application Support/BlenderRender/config.json),
+notification. With several PCs set up, animations go to the Mac app instead, which shares them out
+(a folder in its inbox per request; job ids starting "split-"). Uses the app's own settings (~/Library/Application Support/BlenderRender/config.json),
 packs textures with the Mac's Blender exactly like the app, and downloads into the app's folder.
 
 Standard library only (macOS's Python 3.9). Register with Claude Code:
@@ -19,6 +20,7 @@ import tarfile
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 SERVER = {"name": "blenderrender", "version": "1.0.0"}
@@ -29,6 +31,8 @@ HERE = Path(__file__).resolve().parent
 PACK_SCRIPT = next((p for p in (APP / "Contents/Resources/pack_inspect.py",
                                 HERE.parent / "BlenderRenderApp/Resources/pack_inspect.py") if p.exists()), None)
 APP_DEFAULTS = "com.geysier.blenderrender"
+INBOX = CONFIG.parent / "inbox"
+SPLITS = CONFIG.parent / "splits"
 
 
 class ToolError(Exception):
@@ -100,6 +104,11 @@ def describe(job, position=None):
     """One job as a dict of plain facts, with the time left counted down to now."""
     out = {"id": job["id"], "name": job.get("name"), "state": job.get("state"),
            "mode": job.get("mode"), "resolution_percent": job.get("pct"), "samples": job.get("samples")}
+    if job.get("split_across"):
+        out["split_across"] = job["split_across"]
+        out["frames_done"] = job["frames_done"]
+        if job.get("output"):
+            out["output_folder"] = job["output"]
     if job.get("mode") == "animation":
         out["frames"] = "%s-%s" % (job.get("start"), job.get("end"))
         if (job.get("step") or 1) > 1:
@@ -126,6 +135,70 @@ def describe(job, position=None):
         if job.get("error"):
             out["error"] = job["error"]
     return out
+
+
+def split_jobs():
+    """The Mac app's split jobs, shaped like PC jobs, from the state files it keeps."""
+    jobs = []
+    for file in SPLITS.glob("*/state.json"):
+        try:
+            s = json.loads(file.read_text())
+        except (OSError, ValueError):
+            continue
+        step = s["step"]
+        frames = (s["end"] - s["start"]) // step + 1
+        done = sum((b["end"] - b["start"]) // step + 1 for b in s["batches"] if b["status"] == "done")
+        job = {"id": "split-" + s["id"], "name": s["name"], "mode": "animation", "state": s["state"],
+               "start": s["start"], "end": s["end"], "step": step, "pct": s["pct"], "samples": s["samples"],
+               "started": s["submitted"], "ended": s.get("ended"), "error": s.get("error"), "files": s.get("files", 0),
+               "progress": done / frames, "output": s.get("output"), "log_lines": s.get("log", []),
+               "split_across": [p.get("name") or p.get("host") for p in s["pcs"]], "frames_done": "%d of %d" % (done, frames)}
+        if s["state"] == "rendering" and done:
+            job["eta"] = (time.time() - s["submitted"]) / done * (frames - done)
+            job["eta_at"] = time.time()
+        jobs.append(job)
+    return sorted(jobs, key=lambda j: j["started"])
+
+
+def find_split(job_id):
+    for j in split_jobs():
+        if j["id"] == job_id:
+            return j
+    raise ToolError("No split job %s in the BlenderRender app." % job_id)
+
+
+def ask_app(request, blend=None, wait=20):
+    """Put a request in the app's inbox and return its reply, or None if no app took it.
+
+    `blend` moves in with the request; unless the app kept it, it's moved back afterwards.
+    """
+    folder = INBOX / uuid.uuid4().hex
+    folder.mkdir(parents=True)
+    held = folder / "input.blend"
+    request_file = folder / "request.json"
+    try:
+        if blend:
+            shutil.move(str(blend), str(held))
+        tmp = folder / "request.tmp"
+        tmp.write_text(json.dumps(request))
+        os.replace(tmp, request_file)
+        ensure_app_running()
+        reply_file = folder / "reply.json"
+        deadline = time.time() + wait
+        while True:
+            if reply_file.exists():
+                return json.loads(reply_file.read_text())
+            if time.time() > deadline:
+                try:
+                    request_file.unlink()  # still unclaimed: no app is reading the inbox
+                    return None
+                except OSError:
+                    deadline = time.time() + 60  # the app has it; a reply is moments away
+            time.sleep(0.25)
+    finally:
+        if blend and held.exists():
+            shutil.move(str(held), str(blend))
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def pretty_gpu(raw):
@@ -168,6 +241,7 @@ def tool_status(cfg, _args):
     v = rq_json(cfg, "version")
     lst = rq_json(cfg, "list")
     jobs = [j for j in lst["jobs"] if not j.get("parent")]  # batches of a split job belong to the Mac app
+    jobs += split_jobs()
     queued = [j for j in jobs if j.get("state") == "queued"]
     return {
         "render_pc": v.get("host"), "gpu": pretty_gpu(v.get("gpu") or ""), "queue_worker_running": lst.get("worker"),
@@ -213,9 +287,17 @@ def tool_queue(cfg, args):
                 opts["fast"] = True
         else:
             opts["frame"] = int(args.get("frame", info["frame_current"]))
-        b64 = base64.urlsafe_b64encode(json.dumps(opts).encode()).decode().rstrip("=")
-        with open(packed, "rb") as fh:
-            reply = rq_json(cfg, "receive", b64, stdin=fh, timeout=1800)
+        split = None
+        if mode == "animation" and any(p.get("enabled", True) for p in cfg.get("extraPCs") or []):
+            split = ask_app({"action": "split", "name": opts["name"], "start": opts["start"], "end": opts["end"],
+                             "step": opts["step"], "pct": opts["pct"], "samples": opts["samples"], "fast": fast,
+                             "info": info}, blend=packed)
+        if split and split.get("split"):
+            reply = {"id": split["job_id"]}
+        else:
+            b64 = base64.urlsafe_b64encode(json.dumps(opts).encode()).decode().rstrip("=")
+            with open(packed, "rb") as fh:
+                reply = rq_json(cfg, "receive", b64, stdin=fh, timeout=1800)
     finally:
         shutil.rmtree(packed.parent, ignore_errors=True)
     ensure_app_running()
@@ -229,12 +311,17 @@ def tool_queue(cfg, args):
               "output": ("video (the file's own format)" if mode == "animation" and info["video"]
                          else "PNG image sequence" if mode == "animation" else "PNG"),
               "note": "It's in BlenderRender's queue now; the app notifies when it's done."}
+    if split and split.get("split"):
+        result["split_across"] = split["pcs"]
+        result["note"] = "Sharing it across these PCs. The Mac app runs the job, so it must stay open, and the result lands in the downloads folder by itself."
     if info.get("missing"):
         result["warning"] = "Textures missing on this Mac, so not packed: " + ", ".join(info["missing"])
     return result
 
 
 def find_job(cfg, job_id):
+    if job_id.startswith("split-"):
+        return find_split(job_id)
     for j in rq_json(cfg, "list")["jobs"]:
         if j["id"] == job_id:
             return j
@@ -242,6 +329,8 @@ def find_job(cfg, job_id):
 
 
 def tool_job(cfg, args):
+    if args["job_id"].startswith("split-"):
+        return describe(find_split(args["job_id"]))
     jobs = [j for j in rq_json(cfg, "list")["jobs"] if not j.get("parent")]
     queued = [j["id"] for j in jobs if j.get("state") == "queued"]
     for j in jobs:
@@ -267,6 +356,8 @@ def tool_download(cfg, args):
     job = find_job(cfg, args["job_id"])
     if not job.get("files"):
         raise ToolError("Job %s has no output files (state: %s)." % (job["id"], job.get("state")))
+    if job.get("split_across"):
+        return download_split(job, args)
     name = (job.get("name") or job["id"]).replace("/", "-").replace(":", "-")
     stamp = "-".join(job["id"].split("-")[:2])
     dest = Path(os.path.expanduser(args.get("destination") or cfg["downloadDir"])) / ("%s %s" % (name, stamp))
@@ -300,19 +391,48 @@ def tool_download(cfg, args):
     return {"downloaded_to": str(dest), "files": files[:50] + (["... %d more" % (len(files) - 50)] if len(files) > 50 else [])}
 
 
+def download_split(job, args):
+    """The app already saved a split job's result; copy it if another folder was asked for."""
+    src = Path(job["output"])
+    dest = src
+    if args.get("destination"):
+        dest = Path(os.path.expanduser(args["destination"])) / src.name
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+    if args.get("reveal", True):
+        subprocess.run(["open", str(dest)], capture_output=True)
+    return {"downloaded_to": str(dest), "files": sorted(p.name for p in dest.iterdir())[:50]}
+
+
+def app_action(action, job_id):
+    find_split(job_id)
+    reply = ask_app({"action": action, "job": job_id})
+    if reply is None:
+        raise ToolError("The BlenderRender app didn't answer. Is it open?")
+    if reply.get("error"):
+        raise ToolError(reply["error"])
+
+
 def tool_cancel(cfg, args):
+    if args["job_id"].startswith("split-"):
+        app_action("cancel", args["job_id"])
+        return {"cancelled": args["job_id"], "note": "The render stops on every PC and its frames are deleted."}
     find_job(cfg, args["job_id"])
     rq_json(cfg, "cancel", args["job_id"])
     return {"cancelled": args["job_id"], "note": "Anything already rendered stays downloadable."}
 
 
 def tool_remove(cfg, args):
+    if args["job_id"].startswith("split-"):
+        app_action("remove", args["job_id"])
+        return {"removed": args["job_id"], "note": "Downloads on this Mac are kept."}
     find_job(cfg, args["job_id"])
     rq_json(cfg, "delete", args["job_id"], timeout=60)
     return {"removed": args["job_id"], "note": "Its files on the render PC are deleted; downloads on this Mac are kept."}
 
 
 def tool_log(cfg, args):
+    if args["job_id"].startswith("split-"):
+        return "\n".join(find_split(args["job_id"])["log_lines"][-int(args.get("lines") or 80):]) or "(empty log)"
     log = rq_json(cfg, "log", args["job_id"]).get("log", "")
     n = int(args.get("lines") or 80)
     # Progress lines are noise in a log read; keep Blender's own output.

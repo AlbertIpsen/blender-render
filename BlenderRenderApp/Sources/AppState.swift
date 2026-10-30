@@ -27,6 +27,8 @@ struct JobSetup: Identifiable {
     var fast = false
     /// Share the frames between all PCs that can take part.
     var split = true
+    /// Render every Nth frame, when something other than `fast` chose it (the Claude connector).
+    var step: Int?
 
     static let fastStep = 4, fastPct = 35, fastSamples = 16
 }
@@ -62,6 +64,7 @@ final class AppState: ObservableObject {
     private var pcJobs: [PCJob] = []
     private lazy var splits = SplitManager { [weak self] in self?.refreshJobs() }
     private var pollTask: Task<Void, Never>?
+    private var pcsChecked = false
     /// Held while the Mac must not idle to sleep; ending it hands sleep back to macOS.
     private var awakeActivity: NSObjectProtocol?
 
@@ -97,6 +100,13 @@ final class AppState: ObservableObject {
             while !Task.isCancelled {
                 await self?.checkPCs()
                 try? await Task.sleep(for: .seconds(20))
+            }
+        }
+        Task { [weak self] in
+            self?.clearOldInbox()
+            while !Task.isCancelled {
+                self?.checkInbox()
+                try? await Task.sleep(for: .seconds(1))
             }
         }
         Task { [weak self] in
@@ -167,6 +177,7 @@ final class AppState: ObservableObject {
             var found: [String: PCVersion] = [:]
             for await (id, version) in group { found[id] = version }
             pcVersions = found
+            pcsChecked = true
         }
     }
 
@@ -397,6 +408,75 @@ final class AppState: ObservableObject {
         setups.removeAll { $0.id == s.id }
         uploads.removeAll { $0.id == s.id }
         try? FileManager.default.removeItem(at: s.packed.deletingLastPathComponent())
+    }
+
+    // MARK: requests from the Claude connector
+
+    private struct InboxRequest: Decodable {
+        let action: String
+        var job: String?
+        var name: String?
+        var start: Int?
+        var end: Int?
+        var step: Int?
+        var pct: Int?
+        var samples: Int?
+        var fast: Bool?
+        var info: BlendInfo?
+    }
+
+    private var inbox: URL { Config.fileURL.deletingLastPathComponent().appendingPathComponent("inbox") }
+
+    /// Each request is a folder from blenderrender_mcp.py. Renaming request.json claims it, so the
+    /// connector can tell an app that's working on it from one that isn't there.
+    private func checkInbox() {
+        guard pcsChecked else { return }  // a split needs to know which PCs are online
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: inbox.path)) ?? [] {
+            let dir = inbox.appendingPathComponent(name)
+            let taken = dir.appendingPathComponent("taken.json")
+            guard (try? fm.moveItem(at: dir.appendingPathComponent("request.json"), to: taken)) != nil else { continue }
+            let request = (try? Data(contentsOf: taken)).flatMap { try? JSONDecoder().decode(InboxRequest.self, from: $0) }
+            let reply = request.map { handle($0, in: dir) } ?? ["error": "BlenderRender couldn't read the request."]
+            if let data = try? JSONSerialization.data(withJSONObject: reply) {
+                try? data.write(to: dir.appendingPathComponent("reply.json"), options: .atomic)
+            }
+        }
+    }
+
+    private func handle(_ r: InboxRequest, in dir: URL) -> [String: Any] {
+        switch r.action {
+        case "split":
+            guard let info = r.info, let start = r.start, let end = r.end else { return ["split": false] }
+            let pcs = splitPCs(blender: info.blender)
+            guard pcs.count >= 2 else { return ["split": false] }
+            let s = JobSetup(id: UUID(), packed: dir.appendingPathComponent("input.blend"), info: info,
+                             name: r.name ?? "Render", isAnimation: true, frame: info.frame_current, start: start, end: end,
+                             pct: r.pct ?? info.pct, samples: r.samples ?? info.samples, fast: r.fast ?? false, step: r.step)
+            do {
+                return ["split": true, "job_id": try splits.start(s, pcs: pcs, cfg: cfg), "pcs": pcs.map(\.displayName)]
+            } catch {
+                return ["split": false, "error": error.localizedDescription]
+            }
+        case "cancel", "remove":
+            guard let job = jobs.first(where: { $0.id == r.job }) else { return ["error": "No job \(r.job ?? "")."] }
+            if r.action == "cancel" { cancel(job) } else { remove(job) }
+            return ["ok": true]
+        default:
+            return ["error": "Unknown request \(r.action)."]
+        }
+    }
+
+    /// Left behind by a connector that was stopped halfway; a live one finishes within minutes.
+    private func clearOldInbox() {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: inbox.path)) ?? [] {
+            let dir = inbox.appendingPathComponent(name)
+            if let date = (try? fm.attributesOfItem(atPath: dir.path))?[.modificationDate] as? Date,
+               date.timeIntervalSinceNow < -3600 {
+                try? fm.removeItem(at: dir)
+            }
+        }
     }
 
     func dismissUpload(_ id: UUID) { uploads.removeAll { $0.id == id } }

@@ -258,6 +258,10 @@ final class SplitRun {
                                    "frames_only": true, "parent": state.id, "blend": state.id]
         if state.fast { opts["fast"] = true }
         let job = try await rpc.submitBatch(options: opts)
+        guard running else {  // cancelled while this was on its way, so cancel() didn't know its id
+            try? await rpc.delete(job)
+            return
+        }
         state.batches[i].jobID = job
         changed()
 
@@ -394,8 +398,9 @@ final class SplitManager {
         runs.sort { $0.state.submitted < $1.state.submitted }
     }
 
-    func start(_ s: JobSetup, pcs: [PCEntry], cfg: Config) throws {
-        let step = s.fast ? JobSetup.fastStep : 1
+    /// Returns the new job's id.
+    @discardableResult func start(_ s: JobSetup, pcs: [PCEntry], cfg: Config) throws -> String {
+        let step = s.step ?? (s.fast ? JobSetup.fastStep : 1)
         let state = SplitState(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
                                name: s.name, start: s.start, end: s.end, step: step, pct: s.pct, samples: s.samples,
                                fast: s.fast, video: s.info.video, pcs: pcs, submitted: Date().timeIntervalSince1970,
@@ -404,6 +409,7 @@ final class SplitManager {
         runs.append(run)
         try run.begin(packed: s.packed)
         onChange()
+        return run.job.id
     }
 
     func remove(_ run: SplitRun) {

@@ -18,6 +18,8 @@ In Settings, choose Add PC… and follow the three steps. While that window is o
 
 The Mac hands each PC a batch of frames at a time (`Splitter.swift`), so faster PCs do more, and a PC that drops out loses only its current batch. Videos render as PNG frames and the Mac's Blender joins them, so the Mac has to stay on until the job is done. Every PC needs the same Blender major.minor version as the Mac. Stills and unsplit jobs go to the main PC.
 
+Claude's `queue_render` hands animations to the app through a folder (`inbox` in the app's support folder), so they split the same way. If the app doesn't answer or fewer than two PCs can take part, the job goes to the main PC.
+
 ## Publish an update
 
 Make your changes, then:
