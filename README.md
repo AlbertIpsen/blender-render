@@ -14,7 +14,7 @@ Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and update
 
 ## Several PCs
 
-In Settings, choose Add PC… and follow the three steps. With two or more PCs switched on, the add sheet offers to split an animation between them.
+In Settings, choose Add PC… and follow the three steps. While that window is open, the Mac serves the setup script on the local network (`SetupServer.swift`), so the PC only needs a short line like `irm 192.168.1.20/4821 | iex`. The code changes each time and a few wrong tries turn it off; it's plain HTTP, so use Copy Script on a network you don't trust. With two or more PCs switched on, the add sheet offers to split an animation between them.
 
 The Mac hands each PC a batch of frames at a time (`Splitter.swift`), so faster PCs do more, and a PC that drops out loses only its current batch. Videos render as PNG frames and the Mac's Blender joins them, so the Mac has to stay on until the job is done. Every PC needs the same Blender major.minor version as the Mac. Stills and unsplit jobs go to the main PC.
 

@@ -42,6 +42,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSLocalNetworkUsageDescription</key><string>BlenderRender shares its setup script with render PCs on your network.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

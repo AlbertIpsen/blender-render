@@ -25,7 +25,33 @@ enum SetupScript {
     }
 }
 
-/// Add PC: copy the script, run it on the PC, paste back the code it prints.
+/// The short line that fetches the setup script from this Mac. Works while the view is on screen.
+struct SetupCommand: View {
+    @StateObject private var server = SetupServer()
+
+    var body: some View {
+        Group {
+            if let command = server.command {
+                Text(command)
+                    .font(.system(.title3, design: .monospaced).weight(.semibold)).foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+            } else if server.locked {
+                Text("Too many wrong codes, so this link was turned off. Close this window and open it again for a new one.")
+                    .foregroundStyle(.red)
+            } else {
+                Text("The short link isn't available. Is this Mac on a network? Copy Script still works.")
+            }
+        }
+        .onAppear { if let script = SetupScript.withKey() { server.start(script: script) } }
+        .onDisappear { server.stop() }
+    }
+}
+
+/// Add PC: fetch or copy the script, run it on the PC, paste back the code it prints.
 struct AddPCView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.dismiss) private var dismiss
@@ -40,9 +66,14 @@ struct AddPCView: View {
             Text("Add a Render PC").font(.title2.weight(.semibold))
             Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
             VStack(alignment: .leading, spacing: 6) {
-                Text("2. Copy the setup script, then paste it into **PowerShell as Administrator** on the PC and press Return.")
-                Button { copyScript() } label: {
-                    Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
+                Text("2. Open **PowerShell as Administrator** on the PC, type this line and press Return. It works while this window is open.")
+                SetupCommand()
+                HStack(spacing: 6) {
+                    Text("Doesn't connect?").foregroundStyle(.secondary)
+                    Button { copyScript() } label: {
+                        Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
+                    }
+                    Text("and paste it instead.").foregroundStyle(.secondary)
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -119,8 +150,10 @@ struct GuideView: View {
                     step(1, "Install Blender and the NVIDIA driver", symbol: "square.and.arrow.down") {
                         Text("On the PC, install **Blender \(macBlenderVersion)** from blender.org (the same version as this Mac, so files open identically) and the latest **NVIDIA Studio or Game Ready driver**. Keep Blender's default install folder.")
                     }
-                    step(2, "On this Mac: click Copy Script", symbol: "doc.on.clipboard") {
-                        Text("That's all for this step. The setup script is now on your Mac's clipboard, and AnyDesk shares the clipboard with the PC, so you can paste it there in step 3. Not using AnyDesk? Choose **Save as File…** and move the file to the PC with a USB stick.")
+                    step(2, "Get the setup script to the PC", symbol: "doc.on.clipboard") {
+                        Text("If the PC is on the same network as this Mac, type this line into PowerShell in step 3 instead of pasting. It works while this guide is open.")
+                        SetupCommand()
+                        Text("Otherwise, click **Copy Script**: AnyDesk shares the clipboard with the PC, so you can paste it there in step 3. Not using AnyDesk? Choose **Save as File…** and move the file to the PC with a USB stick.").padding(.top, 4)
                         HStack(spacing: 8) {
                             Button { copyScript() } label: {
                                 Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
@@ -131,8 +164,8 @@ struct GuideView: View {
                         .padding(.top, 4)
                         .disabled(SetupScript.url == nil)
                     }
-                    step(3, "On the PC: paste it into PowerShell", symbol: "terminal") {
-                        Text("1. Click **Start**, type **PowerShell**, right-click **Windows PowerShell** and choose **Run as administrator**.\n2. Click **Yes** on the Windows prompt. Over AnyDesk it may only show on the PC's own screen.\n3. **Right-click** once inside the blue window to paste, then press **Return**. If the lines start with **>>**, press **Return** once more; that's PowerShell waiting for the end of the script.\n4. Wait for **== Done. Send these back:** and note the lines below it.")
+                    step(3, "On the PC: run it in PowerShell", symbol: "terminal") {
+                        Text("1. Click **Start**, type **PowerShell**, right-click **Windows PowerShell** and choose **Run as administrator**.\n2. Click **Yes** on the Windows prompt. Over AnyDesk it may only show on the PC's own screen.\n3. Type the short line, or **right-click** once inside the blue window to paste the script, then press **Return**. If the lines start with **>>**, press **Return** once more; that's PowerShell waiting for the end of the script.\n4. Wait for **== Done. Send these back:** and note the lines below it.")
                         Text("The script turns on Windows' built-in SSH server, lets this Mac sign in with its key (no password) and installs the render queue. If you saved the file instead, run this in the folder you put it in:").padding(.top, 2)
                         code("powershell -ExecutionPolicy Bypass -File setup_windows_pc.ps1")
                     }
