@@ -12,9 +12,16 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq send <id>               tar of the job's out/ folder on stdout
   rq size <id>               about how many bytes `send` will stream (for the app's progress bar)
   rq log <id>                last 200 lines of the job's Blender log
+  rq cache-has <key>         is this split job's .blend already on the PC
+  rq cache-put <key>         read a split job's .blend from stdin, kept for all its batches
+  rq cache-drop <key>        delete it when the split job is over
+  rq batch <b64 options>     queue a batch of frames from a cached .blend, print its id
   rq preview <id>            raw bytes of the job's first PNG/JPEG (for notification thumbnails)
   rq worker                  render queued jobs one at a time, forever (scheduled task at logon)
   rq ensure-worker           start the worker if it isn't running
+
+Split jobs: the Mac app hands each PC a batch of frames at a time. A batch is a normal job that
+names a cached .blend (`blend`) and its split job (`parent`), so the file is only sent once.
 
 Jobs are folders under jobs/<id>/: input.blend, job.json (what to render), status.json (where it
 is), log.txt, out/ (renders) and a `cancel` flag file.
@@ -39,9 +46,10 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 6
+VERSION = 7
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
+CACHE = HERE / "cache"
 WIN = os.name == "nt"
 TASK_NAME = "BlenderRenderQueue"
 
@@ -135,10 +143,35 @@ def ensure_worker():
 
 # --- commands ---
 
+def blender_version():
+    """"5.2.1", or "" if Blender won't say. Split jobs need the same version on every PC.
+
+    Remembered per Blender install, because the app asks every 20 seconds.
+    """
+    exe = config()["blender"]
+    try:
+        stamp = f"{exe}:{os.path.getmtime(exe)}"
+    except OSError:
+        stamp = exe
+    known = read_json(HERE / "blender_version.json", {})
+    if known.get("stamp") == stamp:
+        return known.get("version", "")
+    flags = subprocess.CREATE_NO_WINDOW if WIN else 0
+    try:
+        text = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
+                              creationflags=flags).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    m = re.search(r"Blender (\d+\.\d+(?:\.\d+)?)", text)
+    version = m.group(1) if m else ""
+    write_json(HERE / "blender_version.json", {"stamp": stamp, "version": version})
+    return version
+
+
 def cmd_version():
     state = read_json(HERE / "worker_state.json", {})
     out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""),
-         "blender": config()["blender"], "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
+         "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
 
 
 def cmd_list():
@@ -178,6 +211,51 @@ def cmd_receive(b64):
     update_status(d, state="queued")
     started = ensure_worker()
     out({"id": job_id, "worker": started})
+
+
+def cache_path(key):
+    if not re.fullmatch(r"[\w-]+", key or ""):
+        raise SystemExit(f"bad cache key: {key!r}")
+    return CACHE / f"{key}.blend"
+
+
+def cmd_cache_has(key):
+    out({"has": cache_path(key).exists()})
+
+
+def cmd_cache_put(key):
+    CACHE.mkdir(exist_ok=True)
+    p = cache_path(key)
+    part = p.with_suffix(".part")
+    size = 0
+    with open(part, "wb") as fh:
+        src = sys.stdin.buffer
+        while chunk := src.read(1 << 20):
+            fh.write(chunk)
+            size += len(chunk)
+    if size == 0:
+        part.unlink()
+        raise SystemExit("no data received")
+    os.replace(part, p)
+    out({"ok": True})
+
+
+def cmd_cache_drop(key):
+    cache_path(key).unlink(missing_ok=True)
+    out({"ok": True})
+
+
+def cmd_batch(b64):
+    opts = json.loads(base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)))
+    if not cache_path(opts.get("blend")).exists():
+        raise SystemExit("the split job's .blend isn't on this PC")
+    job_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+    d = JOBS / job_id
+    d.mkdir(parents=True)
+    opts["submitted"] = time.time()
+    write_json(d / "job.json", opts)
+    update_status(d, state="queued")
+    out({"id": job_id, "worker": ensure_worker()})
 
 
 def cmd_cancel(job_id):
@@ -274,7 +352,8 @@ PROGRESS = re.compile(r"^progress: frame=(\d*) sample=(\d+)/(\d+) remaining=(.*)
 def render(d, cfg):
     job = read_json(d / "job.json")
     (d / "out").mkdir(exist_ok=True)
-    cmd = [cfg["blender"], "-b", str(d / "input.blend"), "--python-exit-code", "1"]
+    blend = cache_path(job["blend"]) if job.get("blend") else d / "input.blend"
+    cmd = [cfg["blender"], "-b", str(blend), "--python-exit-code", "1"]
     if cfg["gpu"]:
         cmd += ["-P", str(HERE / "remote_gpu.py")]
     opts = base64.urlsafe_b64encode(json.dumps(job).encode()).decode()
@@ -392,6 +471,14 @@ def main():
         cmd_list()
     elif cmd == "receive":
         cmd_receive(rest[0])
+    elif cmd == "cache-has":
+        cmd_cache_has(rest[0])
+    elif cmd == "cache-put":
+        cmd_cache_put(rest[0])
+    elif cmd == "cache-drop":
+        cmd_cache_drop(rest[0])
+    elif cmd == "batch":
+        cmd_batch(rest[0])
     elif cmd == "cancel":
         cmd_cancel(rest[0])
     elif cmd == "delete":

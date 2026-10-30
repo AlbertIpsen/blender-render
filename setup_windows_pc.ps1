@@ -78,3 +78,9 @@ Write-Host "WIN_HOST=$ip   (computer name: $env:COMPUTERNAME)"
 Write-Host "WIN_USER=$env:USERNAME"
 Write-Host "WIN_BLENDER=$(if ($blender) { $blender.FullName } else { 'NOT FOUND - where is blender.exe?' })"
 Write-Host "GPU=$gpu"
+if ($blender) {
+    $pairing = @{ host = $ip; user = $env:USERNAME; name = $env:COMPUTERNAME } | ConvertTo-Json -Compress
+    Write-Host ""
+    Write-Host "== Pairing code. Copy this line into Add PC in BlenderRender:"
+    Write-Host ("BR1:" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairing)))
+}

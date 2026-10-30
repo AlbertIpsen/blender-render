@@ -23,7 +23,7 @@ BIN="$(swift build -c release --show-bin-path)/BlenderRender"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/pc"
 cp "$BIN" "$APP/Contents/MacOS/BlenderRender"
-cp "$HERE/Resources/pack_inspect.py" "$REMOTE/setup_windows_pc.ps1" "$APP/Contents/Resources/"
+cp "$HERE/Resources/pack_inspect.py" "$HERE/Resources/assemble_video.py" "$REMOTE/setup_windows_pc.ps1" "$APP/Contents/Resources/"
 cp "$REMOTE"/pc/*.py "$REMOTE/remote_gpu.py" "$REMOTE/progress.py" "$APP/Contents/Resources/pc/"
 [[ -f "$HERE/Resources/AppIcon.icns" ]] && cp "$HERE/Resources/AppIcon.icns" "$APP/Contents/Resources/"
 

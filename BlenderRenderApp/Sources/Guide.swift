@@ -1,6 +1,99 @@
 import AppKit
 import SwiftUI
 
+/// The setup script that ships in the app.
+enum SetupScript {
+    static let url = Bundle.main.resourceURL?.appendingPathComponent("setup_windows_pc.ps1")
+    static let keyProblem = "Couldn't read this Mac's SSH key at ~/.ssh/id_ed25519.pub."
+
+    /// The script with this Mac's public key filled in; creates a key if the Mac has none.
+    /// The app signs in non-interactively, so a new key has no passphrase.
+    static func withKey() -> String? {
+        guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let ssh = NSHomeDirectory() + "/.ssh"
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: ssh + "/id_ed25519") {
+            try? fm.createDirectory(atPath: ssh, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+            p.arguments = ["-t", "ed25519", "-N", "", "-q", "-f", ssh + "/id_ed25519"]
+            try? p.run()
+            p.waitUntilExit()
+        }
+        guard let key = try? String(contentsOfFile: ssh + "/id_ed25519.pub", encoding: .utf8) else { return nil }
+        return text.replacingOccurrences(of: "__MAC_PUBLIC_KEY__", with: key.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
+/// Add PC: copy the script, run it on the PC, paste back the code it prints.
+struct AddPCView: View {
+    @EnvironmentObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var code = Box("")
+    @StateObject private var copied = Box(false)
+    @StateObject private var problem = Box<String?>(nil)
+    @StateObject private var checking = Box(false)
+    let add: (PCEntry) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add a Render PC").font(.title2.weight(.semibold))
+            Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("2. Copy the setup script, then paste it into **PowerShell as Administrator** on the PC and press Return.")
+                Button { copyScript() } label: {
+                    Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("3. Paste the pairing code it prints at the end (it starts with BR1:).")
+                TextField("BR1:…", text: $code.value).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
+            }
+            if let problem = problem.value {
+                Text(problem).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+            }
+            HStack {
+                Button("Setup Guide") { dismiss(); state.showGuide = true }.buttonStyle(.link)
+                Spacer()
+                if checking.value { ProgressView().controlSize(.small) }
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Add PC") { connect() }
+                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(code.value.isEmpty || checking.value)
+            }
+        }
+        .font(.callout)
+        .padding(24)
+        .frame(width: 460)
+    }
+
+    private func copyScript() {
+        guard let text = SetupScript.withKey() else { problem.value = SetupScript.keyProblem; return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copied.value = true
+    }
+
+    private func connect() {
+        guard let pc = PCEntry(pairingCode: code.value) else {
+            problem.value = "That isn't a pairing code. Copy the whole line that starts with BR1:."
+            return
+        }
+        checking.value = true
+        problem.value = nil
+        Task {
+            defer { checking.value = false }
+            do {
+                _ = try await RenderPC(cfg: state.cfg.config(for: pc)).connect()
+                add(pc)
+                dismiss()
+            } catch {
+                problem.value = "Couldn't connect to \(pc.host). Is the PC on, and on this network?\n\n\(error.localizedDescription)"
+            }
+        }
+    }
+}
+
 /// "Set Up a Render PC" – the steps for turning a Windows PC with an NVIDIA GPU into the render PC.
 /// The setup script ships inside the app, so the guide can copy or save it.
 struct GuideView: View {
@@ -8,8 +101,6 @@ struct GuideView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openSettings) private var openSettings
     @StateObject private var copied = Box(false)
-
-    private static let scriptURL = Bundle.main.resourceURL?.appendingPathComponent("setup_windows_pc.ps1")
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,7 +129,7 @@ struct GuideView: View {
                             Button("Save as File…") { saveScript() }
                         }
                         .padding(.top, 4)
-                        .disabled(Self.scriptURL == nil)
+                        .disabled(SetupScript.url == nil)
                     }
                     step(3, "On the PC: paste it into PowerShell", symbol: "terminal") {
                         Text("1. Click **Start**, type **PowerShell**, right-click **Windows PowerShell** and choose **Run as administrator**.\n2. Click **Yes** on the Windows prompt. Over AnyDesk it may only show on the PC's own screen.\n3. **Right-click** once inside the blue window to paste, then press **Return**. If the lines start with **>>**, press **Return** once more; that's PowerShell waiting for the end of the script.\n4. Wait for **== Done. Send these back:** and note the lines below it.")
@@ -46,7 +137,7 @@ struct GuideView: View {
                         code("powershell -ExecutionPolicy Bypass -File setup_windows_pc.ps1")
                     }
                     step(4, "Enter the PC's details here", symbol: "gearshape") {
-                        Text("When the script finishes it prints **WIN_HOST** (the PC's address) and **WIN_USER**. Put them in Settings and choose **Save & Connect**. BlenderRender copies the queue scripts to the PC by itself.")
+                        Text("When the script finishes it prints **WIN_HOST** (the PC's address), **WIN_USER** and a **pairing code**. In Settings, choose **Add PC…** and paste the code, or type the address and user and choose **Save & Connect**. BlenderRender copies the queue scripts to the PC by itself.")
                         Button("Open Settings…") { openSettings() }.padding(.top, 4)
                     }
                     step(5, "Keep the PC ready", symbol: "bolt.horizontal.circle", last: true) {
@@ -128,29 +219,8 @@ struct GuideView: View {
         }
     }
 
-    /// The setup script with this Mac's public key filled in; creates a key if the Mac has none.
-    /// The app signs in non-interactively, so a new key has no passphrase.
-    private func scriptWithKey() -> String? {
-        guard let url = Self.scriptURL, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let ssh = NSHomeDirectory() + "/.ssh"
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: ssh + "/id_ed25519") {
-            try? fm.createDirectory(atPath: ssh, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-            p.arguments = ["-t", "ed25519", "-N", "", "-q", "-f", ssh + "/id_ed25519"]
-            try? p.run()
-            p.waitUntilExit()
-        }
-        guard let key = try? String(contentsOfFile: ssh + "/id_ed25519.pub", encoding: .utf8) else {
-            state.alert = "Couldn't read this Mac's SSH key at ~/.ssh/id_ed25519.pub."
-            return nil
-        }
-        return text.replacingOccurrences(of: "__MAC_PUBLIC_KEY__", with: key.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
     private func copyScript() {
-        guard let text = scriptWithKey() else { return }
+        guard let text = SetupScript.withKey() else { state.alert = SetupScript.keyProblem; return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         withAnimation(.ui) { copied.value = true }
@@ -158,7 +228,7 @@ struct GuideView: View {
     }
 
     private func saveScript() {
-        guard let text = scriptWithKey() else { return }
+        guard let text = SetupScript.withKey() else { state.alert = SetupScript.keyProblem; return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "setup_windows_pc.ps1"
         panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first

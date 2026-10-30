@@ -12,6 +12,12 @@ Drop a `.blend` on a Mac, render it on a Windows PC with an NVIDIA GPU, and get 
 
 Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and updated from the public [blender-render-releases](https://github.com/AlbertIpsen/blender-render-releases) repo, which holds only the zip, so no GitHub account is needed.
 
+## Several PCs
+
+In Settings, choose Add PC… and follow the three steps. With two or more PCs switched on, the add sheet offers to split an animation between them.
+
+The Mac hands each PC a batch of frames at a time (`Splitter.swift`), so faster PCs do more, and a PC that drops out loses only its current batch. Videos render as PNG frames and the Mac's Blender joins them, so the Mac has to stay on until the job is done. Every PC needs the same Blender major.minor version as the Mac. Stills and unsplit jobs go to the main PC.
+
 ## Publish an update
 
 Make your changes, then:

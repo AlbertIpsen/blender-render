@@ -167,7 +167,7 @@ def pack_and_inspect(cfg, blend):
 def tool_status(cfg, _args):
     v = rq_json(cfg, "version")
     lst = rq_json(cfg, "list")
-    jobs = lst["jobs"]
+    jobs = [j for j in lst["jobs"] if not j.get("parent")]  # batches of a split job belong to the Mac app
     queued = [j for j in jobs if j.get("state") == "queued"]
     return {
         "render_pc": v.get("host"), "gpu": pretty_gpu(v.get("gpu") or ""), "queue_worker_running": lst.get("worker"),
@@ -242,7 +242,7 @@ def find_job(cfg, job_id):
 
 
 def tool_job(cfg, args):
-    jobs = rq_json(cfg, "list")["jobs"]
+    jobs = [j for j in rq_json(cfg, "list")["jobs"] if not j.get("parent")]
     queued = [j["id"] for j in jobs if j.get("state") == "queued"]
     for j in jobs:
         if j["id"] == args["job_id"]:

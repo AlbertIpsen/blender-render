@@ -25,6 +25,8 @@ struct JobSetup: Identifiable {
     var samples: Int
     /// Fast preview (animations): every `fastStep`-th frame, persistent data; the video keeps its length.
     var fast = false
+    /// Share the frames between all PCs that can take part.
+    var split = true
 
     static let fastStep = 4, fastPct = 35, fastSamples = 16
 }
@@ -50,9 +52,15 @@ final class AppState: ObservableObject {
     @Published var installingUpdate = false
     /// Job whose Blender log sheet is open (from a row or a "Show Log" notification button).
     @Published var logRequest: PCJob?
+    /// What each PC reported when last checked, by PCEntry id; nil means it can't be reached.
+    @Published var pcVersions: [String: PCVersion] = [:]
 
     private var connected = false
+    private var pcJobs: [PCJob] = []
+    private lazy var splits = SplitManager { [weak self] in self?.refreshJobs() }
     private var pollTask: Task<Void, Never>?
+    /// Held while the Mac must not idle to sleep; ending it hands sleep back to macOS.
+    private var awakeActivity: NSObjectProtocol?
 
     var pc: RenderPC { RenderPC(cfg: cfg) }
     var rendering: [PCJob] { jobs.filter { $0.state == "rendering" } }
@@ -80,6 +88,14 @@ final class AppState: ObservableObject {
         Notifier.shared.setUp()
         Notifier.shared.onAction = { [weak self] id, action in self?.handleNotification(job: id, action: action) }
         startPolling()
+        splits.restore(cfg: cfg)
+        refreshJobs()
+        Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.checkPCs()
+                try? await Task.sleep(for: .seconds(20))
+            }
+        }
         Task { [weak self] in
             while !Task.isCancelled {
                 self?.checkForUpdates(manual: false)
@@ -88,7 +104,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Automatic checks stay quiet on failure (no gh, no network); the menu item reports everything.
+    /// Automatic checks stay quiet on failure (no network); the menu item reports everything.
     func checkForUpdates(manual: Bool) {
         Task {
             do {
@@ -132,8 +148,52 @@ final class AppState: ObservableObject {
         cfg = new
         cfg.save()
         connected = false
-        jobs = []
+        pcJobs = []
+        refreshJobs()
         startPolling()
+        Task { await checkPCs() }
+    }
+
+    /// Check every PC, installing or updating the queue scripts as `connect` does.
+    private func checkPCs() async {
+        let cfg = self.cfg
+        await withTaskGroup(of: (String, PCVersion?).self) { group in
+            for pc in cfg.allPCs {
+                group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).connect()) }
+            }
+            var found: [String: PCVersion] = [:]
+            for await (id, version) in group { found[id] = version }
+            pcVersions = found
+        }
+    }
+
+    /// PCs that can share an animation made in `blender`: switched on, online and on the same version.
+    func splitPCs(blender: String) -> [PCEntry] {
+        let wanted = Self.majorMinor(blender)
+        return cfg.allPCs.filter { pc in
+            guard pc.enabled, let v = pcVersions[pc.id] else { return false }
+            return Self.majorMinor(v.blender_version ?? "") == wanted
+        }
+    }
+
+    private static func majorMinor(_ version: String) -> String {
+        version.split(separator: ".").prefix(2).joined(separator: ".")
+    }
+
+    /// PCs left out of a split because their Blender differs, for the message in the add sheet.
+    func mismatchedPCs(blender: String) -> [String] {
+        let wanted = Self.majorMinor(blender)
+        return cfg.allPCs.filter { pc in
+            guard pc.enabled, let v = pcVersions[pc.id] else { return false }
+            return Self.majorMinor(v.blender_version ?? "") != wanted
+        }.map(\.displayName)
+    }
+
+    private func refreshJobs() {
+        let new = pcJobs + splits.jobs
+        notifyChanges(old: jobs, new: new)
+        jobs = new
+        updateKeepAwake()
     }
 
     func startPolling() {
@@ -149,6 +209,7 @@ final class AppState: ObservableObject {
 
     /// One refresh; returns seconds until the next one.
     private func poll() async -> Double {
+        defer { updateKeepAwake() }
         guard cfg.isConfigured else { status = .notConfigured; return 2 }
         let pc = self.pc
         do {
@@ -164,8 +225,8 @@ final class AppState: ObservableObject {
             where downloaded[id] == nil {
                 downloaded[id] = path
             }
-            notifyChanges(old: jobs, new: list.jobs)
-            jobs = list.jobs
+            pcJobs = list.jobs.filter { $0.parent == nil }  // batches show as their split job
+            refreshJobs()
             if case .online(let host, let gpu, _) = status {
                 status = .online(host: host, gpu: list.gpu?.isEmpty == false ? list.gpu! : gpu, worker: list.worker)
             }
@@ -174,6 +235,19 @@ final class AppState: ObservableObject {
             connected = false
             status = .offline(error.localizedDescription)
             return 5
+        }
+    }
+
+    /// A PC that's offline can't report its jobs finishing, so it doesn't hold the Mac awake.
+    private func updateKeepAwake() {
+        let busy = !uploads.isEmpty || !downloads.isEmpty || splits.isActive || (connected && pcJobs.contains(where: \.isActive))
+        if cfg.keepAwake && busy {
+            guard awakeActivity == nil else { return }
+            awakeActivity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled,
+                                                                  reason: "BlenderRender is rendering")
+        } else if let activity = awakeActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            awakeActivity = nil
         }
     }
 
@@ -189,6 +263,12 @@ final class AppState: ObservableObject {
         let before = Dictionary(uniqueKeysWithValues: old.map { ($0.id, $0.state ?? "") })
         for job in new where before[job.id] != nil && before[job.id] != job.state {
             switch job.state {
+            case "done" where job.split == true:
+                Notifier.shared.renderDone(job, gpu: "\(jobPCCount(job)) PCs", preview: nil)
+                if let run = splits.run(job.id), let path = run.state.output {
+                    downloaded[job.id] = path
+                    UserDefaults.standard.set(downloaded, forKey: "downloaded")
+                }
             case "done":
                 if cfg.autoDownload && (job.files ?? 0) > 0 && downloaded[job.id] == nil { download(job, reveal: false) }
                 let pc = self.pc, gpu = currentGPU
@@ -202,6 +282,8 @@ final class AppState: ObservableObject {
             }
         }
     }
+
+    private func jobPCCount(_ job: PCJob) -> Int { splits.run(job.id)?.state.pcs.count ?? 1 }
 
     private var currentGPU: String {
         if case .online(_, let gpu, _) = status { return gpu }
@@ -234,6 +316,12 @@ final class AppState: ObservableObject {
 
     func send(_ s: JobSetup) {
         setups.removeAll { $0.id == s.id }
+        let pcs = splitPCs(blender: s.info.blender)
+        if s.isAnimation && s.split && pcs.count >= 2 {
+            uploads.removeAll { $0.id == s.id }
+            do { try splits.start(s, pcs: pcs, cfg: cfg) } catch { alert = error.localizedDescription }
+            return
+        }
         let size = (try? FileManager.default.attributesOfItem(atPath: s.packed.path)[.size] as? NSNumber)?.int64Value
         update(s.id) { $0.phase = .uploading; $0.transfer = Transfer(total: size) }
         var opts: [String: Any] = ["name": s.name, "mode": s.isAnimation ? "animation" : "still",
@@ -272,6 +360,7 @@ final class AppState: ObservableObject {
     // MARK: job actions
 
     func cancel(_ job: PCJob) {
+        if let run = splits.run(job.id) { return run.cancel() }
         let pc = self.pc
         Task {
             do { try await pc.cancel(job.id) } catch { alert = error.localizedDescription }
@@ -280,6 +369,7 @@ final class AppState: ObservableObject {
     }
 
     func remove(_ job: PCJob) {
+        if let run = splits.run(job.id) { return splits.remove(run) }
         let pc = self.pc
         Task {
             do { try await pc.delete(job.id) } catch { alert = error.localizedDescription }
@@ -323,6 +413,7 @@ final class AppState: ObservableObject {
     }
 
     func log(_ job: PCJob) async -> String {
+        if let run = splits.run(job.id) { return run.logText }
         do { return try await pc.log(job.id) } catch { return error.localizedDescription }
     }
 }

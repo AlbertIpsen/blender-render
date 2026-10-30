@@ -163,6 +163,13 @@ struct ConnectionPill: View {
                 Label(title, systemImage: "desktopcomputer").font(.headline)
                 Text(detail).font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                if state.cfg.allPCs.count > 1 {
+                    Divider()
+                    ForEach(state.cfg.allPCs) { pc in
+                        Label(pc.displayName, systemImage: state.pcVersions[pc.id] == nil ? "circle" : "circle.fill")
+                            .font(.callout).foregroundStyle(state.pcVersions[pc.id] == nil ? .secondary : .primary)
+                    }
+                }
                 Divider()
                 HStack {
                     Button("Reconnect") { state.reconnect(); showing.value = false }
@@ -396,12 +403,14 @@ struct JobRow: View {
             if state.downloaded[job.id] != nil { Button("Show in Finder") { state.reveal(job) } }
             Button("Show Blender Log") { logJob = job }
             Divider()
-            Button("Remove from Render PC…", role: .destructive) { confirmRemove.value = true }
+            Button(job.split == true ? "Remove…" : "Remove from Render PC…", role: .destructive) { confirmRemove.value = true }
         }
-        .confirmationDialog("Remove “\(job.displayName)” from the render PC?", isPresented: $confirmRemove.value) {
+        .confirmationDialog(job.split == true ? "Remove “\(job.displayName)”?" : "Remove “\(job.displayName)” from the render PC?",
+                            isPresented: $confirmRemove.value) {
             Button("Remove", role: .destructive) { state.remove(job) }
         } message: {
-            Text(job.isActive ? "The render stops and its files on the PC are deleted."
+            Text(job.split == true ? (job.isActive ? "The render stops on every PC and its frames are deleted." : "Downloads on this Mac are kept.")
+                 : job.isActive ? "The render stops and its files on the PC are deleted."
                               : "Its files on the PC are deleted. Downloads on this Mac are kept.")
         }
     }
@@ -450,6 +459,7 @@ struct JobRow: View {
 
     private var kind: String {
         var parts = [job.mode == "animation" ? "Frames \(job.start ?? 0)–\(job.end ?? 0)" : "Still"]
+        if job.split == true { parts.append("Split across PCs") }
         if let n = job.step, n > 1 { parts.append("Fast preview (every \(n)th)") }
         if let p = job.pct { parts.append("\(p)%") }
         return parts.joined(separator: " · ")
@@ -458,6 +468,7 @@ struct JobRow: View {
     private var detail: String {
         switch job.state {
         case "rendering":
+            if let note = job.note { return note }
             var parts: [String] = []
             if job.mode == "animation", let f = job.frame, let s = job.start, let e = job.end {
                 let n = max(1, job.step ?? 1)
@@ -506,6 +517,8 @@ struct SetupSheet: View {
     @StateObject private var form: Box<JobSetup>
     init(setup: JobSetup) { _form = StateObject(wrappedValue: Box(setup)) }
     private var setup: JobSetup { form.value }
+    private var pcCount: Int { state.splitPCs(blender: setup.info.blender).count }
+    private var mismatched: [String] { state.mismatchedPCs(blender: setup.info.blender) }
 
     var body: some View {
         let i = setup.info
@@ -552,7 +565,10 @@ struct SetupSheet: View {
                         Stepper(value: $form.value.end, in: setup.start...100000) {
                             LabeledContent("Last frame", value: "\(setup.end)")
                         }
-                        Toggle("Fast preview", isOn: Binding(get: { setup.fast }, set: { on in
+                        if pcCount >= 2 {
+                        Toggle("Split across \(pcCount) PCs", isOn: $form.value.split)
+                    }
+                    Toggle("Fast preview", isOn: Binding(get: { setup.fast }, set: { on in
                             form.value.fast = on
                             if on {  // preview size and samples; still adjustable below
                                 form.value.pct = min(form.value.pct, JobSetup.fastPct)
@@ -565,6 +581,9 @@ struct SetupSheet: View {
                         }
                     }
                 } footer: {
+                    if setup.isAnimation && !mismatched.isEmpty {
+                        Text("Not used, different Blender version from this Mac: \(mismatched.joined(separator: ", ")).")
+                    }
                     if setup.isAnimation && setup.fast {
                         Text("Every \(JobSetup.fastStep)th frame: \((setup.end - setup.start) / JobSetup.fastStep + 1) of \(setup.end - setup.start + 1) frames, about \(JobSetup.fastStep)× faster. Same look as the final render; the video keeps its length but plays at a lower frame rate.")
                     } else if setup.isAnimation {
@@ -584,7 +603,7 @@ struct SetupSheet: View {
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
-            .frame(height: setup.isAnimation ? 300 : 190)
+            .frame(height: setup.isAnimation ? (pcCount >= 2 ? 345 : 300) : 190)
             .monospacedDigit()
 
             HStack {
@@ -607,6 +626,16 @@ struct SettingsView: View {
     @EnvironmentObject var state: AppState
     @StateObject private var form = Box(Config())
     @StateObject private var loaded = Box(false)
+    @StateObject private var addingPC = Box(false)
+
+    private func pcEnabled(_ pc: PCEntry) -> Binding<Bool> {
+        Binding {
+            pc.id == "main" ? form.value.mainPCInSplits : pc.enabled
+        } set: { on in
+            if pc.id == "main" { form.value.mainPCInSplits = on }
+            else if let i = form.value.extraPCs.firstIndex(where: { $0.id == pc.id }) { form.value.extraPCs[i].enabled = on }
+        }
+    }
 
     var body: some View {
         Form {
@@ -622,6 +651,23 @@ struct SettingsView: View {
                     Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
                 }
             }
+            Section {
+                ForEach(form.value.allPCs) { pc in
+                    HStack {
+                        Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : .green).frame(width: 8, height: 8)
+                        Toggle(pc.displayName, isOn: pcEnabled(pc))
+                        if pc.id != "main" {
+                            Button { form.value.extraPCs.removeAll { $0.id == pc.id } } label: { Image(systemName: "trash") }
+                                .buttonStyle(.borderless).help("Remove this PC")
+                        }
+                    }
+                }
+                Button("Add PC…") { addingPC.value = true }
+            } header: {
+                Text("PCs That Share Animations")
+            } footer: {
+                Text("With two or more PCs switched on, animations can be split between them. This Mac hands out the frames, so it has to stay on until the job is done. Stills and everything else render on the PC above.")
+            }
             Section("Downloads") {
                 LabeledContent("Save renders to") {
                     HStack {
@@ -630,6 +676,13 @@ struct SettingsView: View {
                     }
                 }
                 Toggle("Download renders automatically when they finish", isOn: $form.value.autoDownload)
+            }
+            Section {
+                Toggle("Keep Mac alive while rendering", isOn: $form.value.keepAwake)
+            } header: {
+                Text("This Mac")
+            } footer: {
+                Text("Stops the Mac sleeping on its own while files are sending, jobs are queued or rendering, or renders are downloading. The screen can still turn off.")
             }
             Section {
                 TextField("Blender on this Mac", text: $form.value.macBlender)
@@ -641,6 +694,16 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $addingPC.value) {
+            AddPCView { pc in
+                if form.value.host.isEmpty {
+                    (form.value.host, form.value.user) = (pc.host, pc.user)
+                } else {
+                    form.value.extraPCs.append(pc)
+                }
+                state.saveConfig(form.value)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Spacer()
@@ -653,7 +716,7 @@ struct SettingsView: View {
             .background(.bar)
             .overlay(alignment: .top) { Divider() }
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 520, height: 640)
         .onAppear { if !loaded.value { form.value = state.cfg; loaded.value = true } }
     }
 

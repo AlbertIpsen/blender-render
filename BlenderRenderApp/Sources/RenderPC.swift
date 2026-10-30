@@ -1,5 +1,35 @@
 import Foundation
 
+/// A render PC beyond the main one in Settings.
+struct PCEntry: Codable, Equatable, Identifiable {
+    var id = UUID().uuidString
+    var name = ""
+    var host = ""
+    var user = ""
+    var queueDir = #"C:\GeysierRender\queue"#
+    var enabled = true
+    /// Non-empty: a folder on this Mac standing in for the PC (testing without a second PC).
+    var testDir = ""
+
+    var displayName: String { name.isEmpty ? (testDir.isEmpty ? host : "Test PC") : name }
+
+    /// Reads the `BR1:` code setup_windows_pc.ps1 prints at the end.
+    init?(pairingCode: String) {
+        struct Code: Decodable { let host: String; let user: String; let name: String? }
+        let text = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("BR1:"), let data = Data(base64Encoded: String(text.dropFirst(4))),
+              let code = try? JSONDecoder().decode(Code.self, from: data), !code.host.isEmpty, !code.user.isEmpty else { return nil }
+        host = code.host
+        user = code.user
+        name = code.name ?? ""
+    }
+
+    init(id: String, name: String, host: String, user: String, queueDir: String, enabled: Bool, testDir: String) {
+        (self.id, self.name, self.host, self.user) = (id, name, host, user)
+        (self.queueDir, self.enabled, self.testDir) = (queueDir, enabled, testDir)
+    }
+}
+
 /// Connection settings, kept in ~/Library/Application Support/BlenderRender/config.json.
 struct Config: Codable, Equatable {
     var host = ""
@@ -9,8 +39,28 @@ struct Config: Codable, Equatable {
     var macBlender = "/Applications/Blender.app/Contents/MacOS/Blender"
     /// Fetch each job's renders as soon as it finishes on the PC.
     var autoDownload = false
+    /// Stop the Mac idling to sleep while the queue is busy, so downloads and notifications keep working.
+    var keepAwake = true
     /// Non-empty: use this folder on the Mac as a stand-in render PC (testing without the PC).
     var testDir = ""
+    /// More PCs to share animations with; the PC above still takes every other job.
+    var extraPCs: [PCEntry] = []
+    /// Whether the PC above helps with split animations.
+    var mainPCInSplits = true
+
+    /// The PC above and any extras, in the shape split jobs use.
+    var allPCs: [PCEntry] {
+        guard isConfigured else { return extraPCs }
+        return [PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
+                        enabled: mainPCInSplits, testDir: testDir)] + extraPCs
+    }
+
+    /// These settings pointed at one PC, for talking to it through RenderPC.
+    func config(for pc: PCEntry) -> Config {
+        var c = self
+        (c.host, c.user, c.queueDir, c.testDir) = (pc.host, pc.user, pc.queueDir, pc.testDir)
+        return c
+    }
 
     var isConfigured: Bool { !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) }
     var displayHost: String { testDir.isEmpty ? host : "this Mac (test mode)" }
@@ -45,6 +95,9 @@ struct Config: Codable, Equatable {
         macBlender = try c.decodeIfPresent(String.self, forKey: .macBlender) ?? d.macBlender
         testDir = try c.decodeIfPresent(String.self, forKey: .testDir) ?? d.testDir
         autoDownload = try c.decodeIfPresent(Bool.self, forKey: .autoDownload) ?? d.autoDownload
+        extraPCs = try c.decodeIfPresent([PCEntry].self, forKey: .extraPCs) ?? d.extraPCs
+        mainPCInSplits = try c.decodeIfPresent(Bool.self, forKey: .mainPCInSplits) ?? d.mainPCInSplits
+        keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
     }
 }
 
@@ -73,6 +126,12 @@ struct PCJob: Decodable, Identifiable, Equatable {
     /// Seconds left as of `eta_at` (PC clock), from measured frame times; nil while still estimating.
     var eta: Double?
     var eta_at: Double?
+    /// On a batch of a split job: the split job's id.
+    var parent: String?
+    /// True for a split job, which runs on this Mac's scheduler rather than on one PC.
+    var split: Bool?
+    /// What a split job's PCs are doing, shown in place of the frame and sample line.
+    var note: String?
 
     /// Seconds left right now, counting down between updates from the PC.
     func secondsLeft(at now: Date = Date()) -> Double? {
@@ -110,11 +169,11 @@ struct PCJob: Decodable, Identifiable, Equatable {
 }
 
 struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String? }
-struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String? }
+struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String? }
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 6
+    static let protocolVersion = 7
     let cfg: Config
 
     private var sshOptions: [String] {
@@ -184,6 +243,25 @@ struct RenderPC {
         let data = try await rq(["receive", b64], stdinFile: blend, progress: progress)
         struct Reply: Decodable { let id: String }
         return try decode(Reply.self, data).id
+    }
+
+    func cacheHas(_ key: String) async throws -> Bool {
+        struct Reply: Decodable { let has: Bool }
+        return try decode(Reply.self, try await rq(["cache-has", key])).has
+    }
+
+    /// Send a split job's .blend once; all its batches on this PC render from it.
+    func cachePut(_ key: String, blend: URL) async throws { _ = try await rq(["cache-put", key], stdinFile: blend) }
+    func cacheDrop(_ key: String) async throws { _ = try await rq(["cache-drop", key]) }
+
+    /// Queue a batch of a split job; returns its job id.
+    func submitBatch(options: [String: Any]) async throws -> String {
+        let json = try JSONSerialization.data(withJSONObject: options)
+        let b64 = json.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        struct Reply: Decodable { let id: String }
+        return try decode(Reply.self, try await rq(["batch", b64])).id
     }
 
     /// A small PNG of the job's first image for notification banners; nil if there's none.

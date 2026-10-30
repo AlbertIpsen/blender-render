@@ -4,9 +4,10 @@
 
 Options (from the Mac app): name, mode ("still" | "animation"), frame (still), start/end (animation),
 pct (resolution %, 0 keeps the file's), samples (0 keeps the file's), step (animations: render every
-step-th frame; a video then plays at fps/step so it keeps its real length) and fast (turn on Cycles'
-persistent data so the scene isn't rebuilt every frame). Stills always come out as PNG
-when the file is set to a video format; animations keep the file's output format.
+step-th frame; a video then plays at fps/step so it keeps its real length), fast (turn on Cycles'
+persistent data so the scene isn't rebuilt every frame) and frames_only (a batch of a split job: a
+video setting renders PNG frames instead, which the Mac joins at the end). Stills always come out as
+PNG when the file is set to a video format; animations keep the file's output format.
 
 Output names always carry their extension, even when the .blend has File Extensions turned off
 (common when its own output path already ends in .mp4): videos get name.<container ext>, image
@@ -37,6 +38,13 @@ is_video = getattr(r.image_settings, "media_type", "IMAGE") != "IMAGE" or r.imag
 # "name0001-0500.mp4", so videos get the extension written into the path instead.
 VIDEO_EXT = {"MPEG4": ".mp4", "QUICKTIME": ".mov", "MKV": ".mkv", "WEBM": ".webm", "AVI": ".avi",
              "OGG": ".ogv", "FLASH": ".flv", "MPEG1": ".mpg", "MPEG2": ".mpg", "DV": ".dv"}
+
+if opts.get("frames_only") and is_video:
+    if hasattr(r.image_settings, "media_type"):
+        r.image_settings.media_type = "IMAGE"
+    r.image_settings.file_format = "PNG"
+    r.image_settings.color_mode = "RGB"
+    is_video = False
 
 if opts.get("mode") == "animation":
     sc.frame_start, sc.frame_end = int(opts["start"]), int(opts["end"])
