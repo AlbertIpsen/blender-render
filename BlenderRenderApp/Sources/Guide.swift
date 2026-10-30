@@ -28,6 +28,7 @@ enum SetupScript {
 /// The short line that fetches the setup script from this Mac. Works while the view is on screen.
 struct SetupCommand: View {
     @StateObject private var server = SetupServer()
+    var onPair: ((String) -> Void)?
 
     var body: some View {
         Group {
@@ -46,7 +47,7 @@ struct SetupCommand: View {
                 Text("The short link isn't available. Is this Mac on a network? Copy Script still works.")
             }
         }
-        .onAppear { if let script = SetupScript.withKey() { server.start(script: script) } }
+        .onAppear { if let script = SetupScript.withKey() { server.start(script: script, onPair: onPair) } }
         .onDisappear { server.stop() }
     }
 }
@@ -67,7 +68,10 @@ struct AddPCView: View {
             Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
             VStack(alignment: .leading, spacing: 6) {
                 Text("2. Open **PowerShell as Administrator** on the PC, type this line and press Return. It works while this window is open.")
-                SetupCommand()
+                SetupCommand { pairing in
+                    code.value = pairing
+                    connect()
+                }
                 HStack(spacing: 6) {
                     Text("Doesn't connect?").foregroundStyle(.secondary)
                     Button { copyScript() } label: {
@@ -77,7 +81,7 @@ struct AddPCView: View {
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("3. Paste the pairing code it prints at the end (it starts with BR1:).")
+                Text("3. When the PC finishes, it sends its pairing code here and connects. If you pasted the script, copy the code it prints (it starts with BR1:).")
                 TextField("BR1:…", text: $code.value).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
             }
             if let problem = problem.value {
@@ -119,7 +123,7 @@ struct AddPCView: View {
                 add(pc)
                 dismiss()
             } catch {
-                problem.value = "Couldn't connect to \(pc.host). Is the PC on, and on this network?\n\n\(error.localizedDescription)"
+                problem.value = "Couldn't connect to \(pc.host). Is the PC on, on this network, and set to a Private network in Windows Settings?\n\n\(error.localizedDescription)"
             }
         }
     }

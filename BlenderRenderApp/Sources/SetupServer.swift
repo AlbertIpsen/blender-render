@@ -13,12 +13,16 @@ final class SetupServer: ObservableObject {
 
     private let code = String(Int.random(in: 1000...9999))
     private var listener: NWListener?
-    private var script = Data()
+    private var script = ""
+    private var address = ""
+    private var onPair: ((String) -> Void)?
     private var wrong = 0
 
-    func start(script text: String) {
+    /// With `onPair`, the script reports its pairing code back here when it finishes.
+    func start(script text: String, onPair: ((String) -> Void)? = nil) {
         guard listener == nil, let ip = Self.localIP() else { return }
-        script = Data(text.utf8)
+        script = text
+        self.onPair = onPair
         listen(on: Self.ports[...], ip: ip)
     }
 
@@ -38,8 +42,9 @@ final class SetupServer: ObservableObject {
             guard let self, let l, self.listener === l else { return }
             switch state {
             case .ready:
+                self.address = ip + (port == 80 ? "" : ":\(port)")
                 // Brackets rather than "| iex": the pipe is hard to find on many keyboards.
-                self.command = "iex (irm \(ip)\(port == 80 ? "" : ":\(port)")/\(self.code))"
+                self.command = "iex (irm \(self.address)/\(self.code))"
             case .failed:
                 l.cancel()
                 self.listen(on: ports.dropFirst(), ip: ip)
@@ -57,7 +62,14 @@ final class SetupServer: ObservableObject {
             let request = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
             let path = request.split(separator: " ").dropFirst().first.map { $0.dropFirst() } ?? ""
             if path == self.code {
-                self.reply(c, "200 OK", self.script)
+                let url = self.onPair == nil ? "" : "http://\(self.address)/\(self.code)/pair"
+                self.reply(c, "200 OK", Data(self.script.replacingOccurrences(of: "__PAIR_URL__", with: url).utf8))
+                return
+            }
+            // "GET /4821/pair/<code>": base64 of the PC's details, the part after BR1:.
+            if path.hasPrefix(self.code + "/pair/"), let onPair = self.onPair {
+                onPair("BR1:" + path.dropFirst(self.code.count + 6))
+                self.reply(c, "200 OK", Data("Paired.\n".utf8))
                 return
             }
             // A browser also asks for favicon.ico; only something that looks like a code counts as a guess.

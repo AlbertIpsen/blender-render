@@ -9,6 +9,8 @@ $ErrorActionPreference = "Stop"
 
 # The BlenderRender app fills this in with the Mac's own public key when it copies or saves the script.
 $MacKey = "__MAC_PUBLIC_KEY__"
+# Filled in when the PC fetches the script from Add PC, so the pairing code goes straight back to the Mac.
+$PairUrl = "__PAIR_URL__"
 $RenderRoot = "C:\GeysierRender"
 if ($MacKey -like "__MAC*") { throw "Use Copy Script in BlenderRender (Help > Set Up a Render PC), or put the Mac's ~/.ssh/id_ed25519.pub in `$MacKey." }
 
@@ -82,5 +84,22 @@ if ($blender) {
     $pairing = @{ host = $ip; user = $env:USERNAME; name = $env:COMPUTERNAME } | ConvertTo-Json -Compress
     Write-Host ""
     Write-Host "== Pairing code. Copy this line into Add PC in BlenderRender:"
-    Write-Host ("BR1:" + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairing)))
+    $pairCode = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairing))
+    Write-Host "BR1:$pairCode"
+    if ($PairUrl -and $PairUrl -notlike "__PAIR*") {
+        try {
+            Invoke-RestMethod "$PairUrl/$pairCode" -TimeoutSec 5 | Out-Null
+            Write-Host "== Sent to the Mac. No need to copy it."
+        } catch {
+            Write-Host "== Couldn't reach the Mac. Copy the line above into Add PC."
+        }
+    }
+}
+
+# The firewall rule above only covers Private networks, so the Mac can't connect on a Public one.
+$public = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object NetworkCategory -eq "Public")
+foreach ($net in $public) {
+    Write-Host ""
+    Write-Host "!! '$($net.InterfaceAlias)' is set to Public, so the Mac can't connect through it." -ForegroundColor Yellow
+    Write-Host "!! Fix: Settings > Network & internet > $($net.InterfaceAlias) > Properties > Private network." -ForegroundColor Yellow
 }
