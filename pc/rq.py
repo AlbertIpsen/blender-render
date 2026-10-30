@@ -46,7 +46,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 7
+VERSION = 8
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
@@ -172,6 +172,22 @@ def cmd_version():
     state = read_json(HERE / "worker_state.json", {})
     out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""),
          "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
+
+
+def cmd_stats():
+    """GPU load and free disk for the app's Render PCs window. GPU fields are missing without nvidia-smi."""
+    info = {"disk_free": shutil.disk_usage(HERE).free}
+    flags = subprocess.CREATE_NO_WINDOW if WIN else 0
+    query = "name,utilization.gpu,temperature.gpu,memory.used,memory.total"
+    try:
+        text = subprocess.run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+                              capture_output=True, text=True, timeout=5, creationflags=flags).stdout
+        name, load, temp, used, total = [v.strip() for v in text.splitlines()[0].split(",")]
+        info.update(gpu_name=name, gpu_load=float(load), gpu_temp=float(temp),
+                    vram_used=float(used), vram_total=float(total))
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass  # no NVIDIA tools, or a field reads "[N/A]"
+    out(info)
 
 
 def cmd_list():
@@ -469,6 +485,8 @@ def main():
         cmd_version()
     elif cmd == "list":
         cmd_list()
+    elif cmd == "stats":
+        cmd_stats()
     elif cmd == "receive":
         cmd_receive(rest[0])
     elif cmd == "cache-has":

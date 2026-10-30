@@ -29,6 +29,7 @@ enum SetupScript {
 struct SetupCommand: View {
     @StateObject private var server = SetupServer()
     var onPair: ((String) -> Void)?
+    var isLive: Binding<Bool>?
 
     var body: some View {
         Group {
@@ -49,6 +50,7 @@ struct SetupCommand: View {
         }
         .onAppear { if let script = SetupScript.withKey() { server.start(script: script, onPair: onPair) } }
         .onDisappear { server.stop() }
+        .onChange(of: server.command) { isLive?.wrappedValue = server.command != nil }
     }
 }
 
@@ -60,6 +62,7 @@ struct AddPCView: View {
     @StateObject private var copied = Box(false)
     @StateObject private var problem = Box<String?>(nil)
     @StateObject private var checking = Box(false)
+    @StateObject private var linkLive = Box(false)
     let add: (PCEntry) -> Void
 
     var body: some View {
@@ -68,10 +71,10 @@ struct AddPCView: View {
             Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
             VStack(alignment: .leading, spacing: 6) {
                 Text("2. Open **PowerShell as Administrator** on the PC, type this line and press Return. It works while this window is open.")
-                SetupCommand { pairing in
+                SetupCommand(onPair: { pairing in
                     code.value = pairing
                     connect()
-                }
+                }, isLive: $linkLive.value)
                 HStack(spacing: 6) {
                     Text("Doesn't connect?").foregroundStyle(.secondary)
                     Button { copyScript() } label: {
@@ -82,15 +85,22 @@ struct AddPCView: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("3. When the PC finishes, it sends its pairing code here and connects. If you pasted the script, copy the code it prints (it starts with BR1:).")
+                    .fixedSize(horizontal: false, vertical: true)
                 TextField("BR1:…", text: $code.value).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
+                if checking.value || (linkLive.value && code.value.isEmpty) {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(checking.value ? "Connecting to the PC…" : "Waiting for the PC to finish…").foregroundStyle(.secondary)
+                    }
+                }
             }
             if let problem = problem.value {
                 Text(problem).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Button("Setup Guide") { dismiss(); state.showGuide = true }.buttonStyle(.link)
                 Spacer()
-                if checking.value { ProgressView().controlSize(.small) }
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Add PC") { connect() }
                     .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)

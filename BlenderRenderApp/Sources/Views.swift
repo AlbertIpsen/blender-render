@@ -146,6 +146,7 @@ struct SetUpPCView: View {
 struct ConnectionPill: View {
     @EnvironmentObject var state: AppState
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var showing = Box(false)
 
     var body: some View {
@@ -170,6 +171,8 @@ struct ConnectionPill: View {
                             .font(.callout).foregroundStyle(state.pcVersions[pc.id] == nil ? .secondary : .primary)
                     }
                 }
+                Button("Show PC Details…") { openWindow(id: "pcs"); showing.value = false }
+                    .buttonStyle(.link)
                 Divider()
                 HStack {
                     Button("Reconnect") { state.reconnect(); showing.value = false }
@@ -468,15 +471,7 @@ struct JobRow: View {
     private var detail: String {
         switch job.state {
         case "rendering":
-            if let note = job.note { return note }
-            var parts: [String] = []
-            if job.mode == "animation", let f = job.frame, let s = job.start, let e = job.end {
-                let n = max(1, job.step ?? 1)
-                parts.append("Frame \((f - s) / n + 1) of \((e - s) / n + 1)")
-            }
-            if let s = job.sample, let n = job.samples { parts.append("Sample \(s) of \(n)") }
-            parts.append("\(Int((job.progress ?? 0) * 100))%")
-            return parts.joined(separator: " · ")
+            return job.note ?? job.progressText
         case "queued":
             return position == 1 ? "Starts next" : "Waiting · \(position ?? 0) in line"
         case "done":

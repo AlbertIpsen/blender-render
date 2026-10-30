@@ -159,6 +159,18 @@ struct PCJob: Decodable, Identifiable, Equatable {
 
     var isActive: Bool { state == "queued" || state == "rendering" }
 
+    /// "Frame 12 of 250 · Sample 40 of 128 · 4%": how far a rendering job has got.
+    var progressText: String {
+        var parts: [String] = []
+        if mode == "animation", let f = frame, let s = start, let e = end {
+            let n = max(1, step ?? 1)
+            parts.append("Frame \((f - s) / n + 1) of \((e - s) / n + 1)")
+        }
+        if let s = sample, let n = samples { parts.append("Sample \(s) of \(n)") }
+        parts.append("\(Int((progress ?? 0) * 100))%")
+        return parts.joined(separator: " · ")
+    }
+
     /// "Video", "1 image", "250 frames": an animation that comes back as one file is a video.
     var outputSummary: String {
         let n = files ?? 0
@@ -169,15 +181,26 @@ struct PCJob: Decodable, Identifiable, Equatable {
 }
 
 struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String? }
+
+/// `rq stats`: the GPU fields are missing on a PC without nvidia-smi. VRAM is in MiB.
+struct PCStats: Decodable {
+    let disk_free: Double?
+    let gpu_name: String?
+    let gpu_load: Double?
+    let gpu_temp: Double?
+    let vram_used: Double?
+    let vram_total: Double?
+}
 struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String? }
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 7
+    static let protocolVersion = 8
     let cfg: Config
 
     private var sshOptions: [String] {
-        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=15",
+        // BatchMode can't answer "trust this host?", so a new PC needs accept-new or it never connects.
+        ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=15",
          "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/blenderrender-ssh-%C", "-o", "ControlPersist=120",
          "\(cfg.user)@\(cfg.host)"]
     }
@@ -201,6 +224,7 @@ struct RenderPC {
 
     func version() async throws -> PCVersion { try decode(PCVersion.self, try await rq(["version"])) }
     func list() async throws -> PCList { try decode(PCList.self, try await rq(["list"])) }
+    func stats() async throws -> PCStats { try decode(PCStats.self, try await rq(["stats"])) }
 
     /// Connect, installing or updating the queue scripts on the PC when they're missing or outdated.
     func connect() async throws -> PCVersion {

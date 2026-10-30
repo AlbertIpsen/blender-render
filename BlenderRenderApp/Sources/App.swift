@@ -24,6 +24,11 @@ struct BlenderRenderApp: App {
             }
         }
 
+        Window("Render PCs", id: "pcs") {
+            PCsView().environmentObject(state)
+        }
+        .defaultSize(width: 520, height: 460)
+
         Settings {
             SettingsView().environmentObject(state)
         }

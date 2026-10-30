@@ -54,6 +54,8 @@ final class AppState: ObservableObject {
     @Published var logRequest: PCJob?
     /// What each PC reported when last checked, by PCEntry id; nil means it can't be reached.
     @Published var pcVersions: [String: PCVersion] = [:]
+    /// Live detail for the Render PCs window, by PCEntry id; only kept fresh while that window is open.
+    @Published var pcLive: [String: PCLive] = [:]
 
     private var connected = false
     private var pcJobs: [PCJob] = []
@@ -165,6 +167,48 @@ final class AppState: ObservableObject {
             for await (id, version) in group { found[id] = version }
             pcVersions = found
         }
+    }
+
+    /// Keeps `pcLive` fresh until the calling task is cancelled.
+    func watchPCs() async {
+        while !Task.isCancelled {
+            await refreshPCLive()
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
+    private func refreshPCLive() async {
+        let cfg = self.cfg, known = pcVersions
+        await withTaskGroup(of: (String, PCVersion?, PCLive).self) { group in
+            for pc in cfg.allPCs {
+                group.addTask {
+                    let rpc = RenderPC(cfg: cfg.config(for: pc))
+                    do {
+                        var version = known[pc.id]
+                        if version == nil { version = try await rpc.connect() }
+                        let list = try await rpc.list()
+                        return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date()))
+                    } catch {
+                        return (pc.id, nil, PCLive(error: error.localizedDescription))
+                    }
+                }
+            }
+            for await (id, version, live) in group {
+                var live = live
+                if live.seen == nil {  // keep the last good detail, so a blip doesn't blank the card
+                    live.seen = pcLive[id]?.seen
+                    live.stats = pcLive[id]?.stats
+                }
+                pcVersions[id] = version
+                pcLive[id] = live
+            }
+        }
+    }
+
+    /// Batches of running split jobs this PC has finished.
+    func splitBatchesDone(on id: String) -> Int {
+        splits.runs.filter { $0.state.state == "rendering" }
+            .reduce(0) { $0 + $1.state.batches.filter { $0.pc == id && $0.status == "done" }.count }
     }
 
     /// PCs that can share an animation made in `blender`: switched on, online and on the same version.
