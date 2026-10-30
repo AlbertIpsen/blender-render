@@ -38,7 +38,8 @@ final class SetupServer: ObservableObject {
             guard let self, let l, self.listener === l else { return }
             switch state {
             case .ready:
-                self.command = "irm \(ip)\(port == 80 ? "" : ":\(port)")/\(self.code) | iex"
+                // Brackets rather than "| iex": the pipe is hard to find on many keyboards.
+                self.command = "iex (irm \(ip)\(port == 80 ? "" : ":\(port)")/\(self.code))"
             case .failed:
                 l.cancel()
                 self.listen(on: ports.dropFirst(), ip: ip)
