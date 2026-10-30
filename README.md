@@ -10,14 +10,7 @@ Drop a `.blend` on a Mac, render it on a Windows PC with an NVIDIA GPU, and get 
 
 ## Install
 
-Needs macOS 14+, Blender in `/Applications`, and repo access, because the app updates itself from this private repo through the GitHub CLI.
-
-```bash
-brew install gh
-gh auth login
-gh release download --repo AlbertIpsen/blender-render --pattern BlenderRender.zip --dir /tmp --clobber
-ditto -x -k /tmp/BlenderRender.zip /Applications
-```
+Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and updated from the public [blender-render-releases](https://github.com/AlbertIpsen/blender-render-releases) repo, which holds only the zip, so no GitHub account is needed.
 
 ## Publish an update
 

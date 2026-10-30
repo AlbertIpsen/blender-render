@@ -42,4 +42,6 @@ git commit -q -m "Release v$V" -m "$NOTES" -m "Co-Authored-By: Claude Opus 5.5 <
 git tag "v$V"
 git push -q origin main "v$V"
 gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip --title "v$V" --notes "$NOTES"
+# The public downloads repo is what the app updates from. The private release above keeps older apps moving.
+gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip --repo AlbertIpsen/blender-render-releases --title "v$V" --notes "$NOTES"
 echo "released v$V"

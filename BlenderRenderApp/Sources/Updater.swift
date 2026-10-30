@@ -1,31 +1,36 @@
 import AppKit
 import Foundation
 
-/// Updates are GitHub releases of a private repo, so they go through the gh CLI and its login.
+/// Updates are GitHub releases of a public downloads repo, so no login is needed. The source stays private.
 enum Updater {
-    static let repo = "AlbertIpsen/blender-render"
+    static let repo = "AlbertIpsen/blender-render-releases"
     static let asset = "BlenderRender.zip"
 
     struct Release: Decodable, Equatable {
         let tagName: String
         let body: String?
         var version: String { tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName }
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case body
+        }
     }
 
     static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
-    private static func gh() throws -> String {
-        let found = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let found else {
-            throw ShellError(message: "Updates need the GitHub CLI. Install it with: brew install gh, then run: gh auth login")
+    private static func checkOK(_ response: URLResponse) throws {
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw ShellError(message: "Couldn't reach the update server. Try again later.")
         }
-        return found
     }
 
     static func latest() async throws -> Release {
-        let data = try await Shell.run(try gh(), ["release", "view", "--repo", repo, "--json", "tagName,body"])
+        let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        try checkOK(response)
         return try JSONDecoder().decode(Release.self, from: data)
     }
 
@@ -45,8 +50,10 @@ enum Updater {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("blenderrender-update-\(UUID().uuidString)")
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
-        _ = try await Shell.run(try gh(), ["release", "download", release.tagName, "--repo", repo,
-                                           "--pattern", asset, "--dir", tmp.path])
+        let url = URL(string: "https://github.com/\(repo)/releases/download/\(release.tagName)/\(asset)")!
+        let (download, response) = try await URLSession.shared.download(from: url)
+        try checkOK(response)
+        try fm.moveItem(at: download, to: tmp.appendingPathComponent(asset))
         _ = try await Shell.run("/usr/bin/ditto", ["-x", "-k", tmp.appendingPathComponent(asset).path, tmp.path])
         let new = tmp.appendingPathComponent("BlenderRender.app")
         guard Bundle(url: new)?.bundleIdentifier == Bundle.main.bundleIdentifier else {
