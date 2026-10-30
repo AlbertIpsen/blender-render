@@ -5,3 +5,5 @@ BlenderRenderApp/build/
 jobs/
 # Your render PC's address and user; copy remote_render.env.example to start.
 remote_render.env
+*.bak-*
+*.bak-*/
