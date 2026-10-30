@@ -56,6 +56,7 @@ final class AppState: ObservableObject {
     @Published var pcVersions: [String: PCVersion] = [:]
     /// Live detail for the Render PCs window, by PCEntry id; only kept fresh while that window is open.
     @Published var pcLive: [String: PCLive] = [:]
+    private var lastPCLook = Date.distantPast
 
     private var connected = false
     private var pcJobs: [PCJob] = []
@@ -178,6 +179,9 @@ final class AppState: ObservableObject {
     }
 
     private func refreshPCLive() async {
+        // The window and any open job rows each watch; one look covers them all.
+        guard Date().timeIntervalSince(lastPCLook) > 2 else { return }
+        lastPCLook = Date()
         let cfg = self.cfg, known = pcVersions
         await withTaskGroup(of: (String, PCVersion?, PCLive).self) { group in
             for pc in cfg.allPCs {

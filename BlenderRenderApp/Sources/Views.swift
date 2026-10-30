@@ -16,6 +16,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var picking = Box(false)
     @StateObject private var dropTargeted = Box(false)
+    @AppStorage("showPCs") private var showPCs = true
 
     var body: some View {
         content
@@ -28,11 +29,20 @@ struct ContentView: View {
             } isTargeted: { dropTargeted.value = $0 }
             .toolbar {
                 ToolbarItem(placement: .automatic) { ConnectionPill() }
+                ToolbarItem(placement: .automatic) {
+                    Toggle(isOn: $showPCs) { Label("Render PCs", systemImage: "sidebar.right") }
+                        .help(showPCs ? "Hide the render PCs" : "Show what each render PC is doing")
+                        .disabled(!state.cfg.isConfigured)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { picking.value = true } label: { Label("Add Files", systemImage: "plus") }
                         .help("Add .blend files to the render queue")
                         .disabled(!state.cfg.isConfigured)
                 }
+            }
+            .inspector(isPresented: Binding(get: { showPCs && state.cfg.isConfigured }, set: { showPCs = $0 })) {
+                ScrollView { PCCards().padding(12) }
+                    .inspectorColumnWidth(min: 280, ideal: 320, max: 460)
             }
             .safeAreaInset(edge: .top, spacing: 0) { if state.update != nil { UpdateBanner() } }
             .animation(uiAnimation(reduceMotion), value: state.update)

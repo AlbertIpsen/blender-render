@@ -9,21 +9,25 @@ struct PCLive {
     var seen: Date?
 }
 
-/// One live card per PC: its hardware, what it's rendering and what's waiting.
+/// The Render PCs window.
 struct PCsView: View {
+    var body: some View {
+        ScrollView { PCCards().padding(16) }
+            .frame(minWidth: 460, minHeight: 300)
+    }
+}
+
+/// One live card per PC: its hardware, what it's rendering and what's waiting.
+struct PCCards: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                ForEach(state.cfg.allPCs) { pc in
-                    PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
-                           batchesDone: state.splitBatchesDone(on: pc.id), isMain: pc.id == "main")
-                }
+        VStack(spacing: 12) {
+            ForEach(state.cfg.allPCs) { pc in
+                PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
+                       batchesDone: state.splitBatchesDone(on: pc.id), isMain: pc.id == "main")
             }
-            .padding(16)
         }
-        .frame(minWidth: 460, minHeight: 300)
         .task { await state.watchPCs() }
     }
 }
