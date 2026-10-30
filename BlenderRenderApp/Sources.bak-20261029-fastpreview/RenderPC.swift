@@ -1,0 +1,301 @@
+import Foundation
+
+/// Connection settings, kept in ~/Library/Application Support/BlenderRender/config.json.
+struct Config: Codable, Equatable {
+    var host = ""
+    var user = ""
+    var queueDir = #"C:\GeysierRender\queue"#
+    var downloadDir = NSHomeDirectory() + "/Downloads/BlenderRender"
+    var macBlender = "/Applications/Blender.app/Contents/MacOS/Blender"
+    /// Fetch each job's renders as soon as it finishes on the PC.
+    var autoDownload = false
+    /// Non-empty: use this folder on the Mac as a stand-in render PC (testing without the PC).
+    var testDir = ""
+
+    var isConfigured: Bool { !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) }
+    var displayHost: String { testDir.isEmpty ? host : "this Mac (test mode)" }
+
+    static var fileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BlenderRender")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("config.json")
+    }
+
+    static func load() -> Config {
+        guard let data = try? Data(contentsOf: fileURL),
+              let cfg = try? JSONDecoder().decode(Config.self, from: data) else { return Config() }
+        return cfg
+    }
+
+    func save() {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? enc.encode(self).write(to: Config.fileURL)
+    }
+
+    init() {}
+    init(from decoder: Decoder) throws {  // tolerate keys added in later versions
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Config()
+        host = try c.decodeIfPresent(String.self, forKey: .host) ?? d.host
+        user = try c.decodeIfPresent(String.self, forKey: .user) ?? d.user
+        queueDir = try c.decodeIfPresent(String.self, forKey: .queueDir) ?? d.queueDir
+        downloadDir = try c.decodeIfPresent(String.self, forKey: .downloadDir) ?? d.downloadDir
+        macBlender = try c.decodeIfPresent(String.self, forKey: .macBlender) ?? d.macBlender
+        testDir = try c.decodeIfPresent(String.self, forKey: .testDir) ?? d.testDir
+        autoDownload = try c.decodeIfPresent(Bool.self, forKey: .autoDownload) ?? d.autoDownload
+    }
+}
+
+/// A job as the PC's rq.py reports it (job.json merged with status.json).
+struct PCJob: Decodable, Identifiable, Equatable {
+    let id: String
+    var name: String?
+    var mode: String?
+    var state: String?
+    var progress: Double?
+    var frame: Int?
+    var start: Int?
+    var end: Int?
+    var sample: Int?
+    var samples: Int?
+    var remaining: String?
+    var saved: Int?
+    var files: Int?
+    var pct: Int?
+    var submitted: Double?
+    var started: Double?
+    var ended: Double?
+    var error: String?
+    var last_file: String?
+    /// Seconds left as of `eta_at` (PC clock), from measured frame times; nil while still estimating.
+    var eta: Double?
+    var eta_at: Double?
+
+    /// Seconds left right now, counting down between updates from the PC.
+    func secondsLeft(at now: Date = Date()) -> Double? {
+        guard state == "rendering", let eta, let at = eta_at else { return nil }
+        return max(0, eta - (now.timeIntervalSince1970 - at))
+    }
+
+    /// "2 h 10 min left" / "less than a minute left": one rounding for the row and the window subtitle.
+    static func timeLeft(_ s: Double) -> String? {
+        if s < 45 { return "less than a minute left" }
+        let m = max(1, Int((s / 60).rounded()))
+        return m < 60 ? "\(m) min left" : "\(m / 60) h \(m % 60) min left"
+    }
+
+    /// "About 2 h 10 min left · done around 18:40", or nil while there's no estimate yet.
+    func timeLeftText(at now: Date = Date()) -> String? {
+        guard let s = secondsLeft(at: now), let short = Self.timeLeft(s) else { return nil }
+        let text = s < 45 ? short.prefix(1).uppercased() + short.dropFirst() : "About " + short
+        guard s >= 600 else { return text }
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = Calendar.current.isDate(now.addingTimeInterval(s), inSameDayAs: now) ? .none : .short
+        return text + " · done around " + f.string(from: now.addingTimeInterval(s))
+    }
+
+    var isActive: Bool { state == "queued" || state == "rendering" }
+
+    /// "Video", "1 image", "250 frames": an animation that comes back as one file is a video.
+    var outputSummary: String {
+        let n = files ?? 0
+        if mode == "animation" { return n == 1 ? "Video" : "\(n) frames" }
+        return n == 1 ? "1 image" : "\(n) files"
+    }
+    var displayName: String { name ?? id }
+}
+
+struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String? }
+struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String? }
+
+/// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
+struct RenderPC {
+    static let protocolVersion = 5
+    let cfg: Config
+
+    private var sshOptions: [String] {
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=15",
+         "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/blenderrender-ssh-%C", "-o", "ControlPersist=120",
+         "\(cfg.user)@\(cfg.host)"]
+    }
+
+    private func rq(_ args: [String], stdinFile: URL? = nil, stdoutFile: URL? = nil,
+                    progress: (@Sendable (Int64) -> Void)? = nil) async throws -> Data {
+        if !cfg.testDir.isEmpty {
+            return try await Shell.run("/usr/bin/python3", [cfg.testDir + "/rq.py"] + args,
+                                       stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
+        }
+        let cmd = "\"\(cfg.queueDir)\\rq.cmd\" " + args.joined(separator: " ")
+        return try await Shell.run("/usr/bin/ssh", sshOptions + [cmd],
+                                   stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
+        do { return try JSONDecoder().decode(type, from: data) } catch {
+            throw ShellError(message: "Unexpected reply from the render PC: " + String(decoding: data.prefix(300), as: UTF8.self))
+        }
+    }
+
+    func version() async throws -> PCVersion { try decode(PCVersion.self, try await rq(["version"])) }
+    func list() async throws -> PCList { try decode(PCList.self, try await rq(["list"])) }
+
+    /// Connect, installing or updating the queue scripts on the PC when they're missing or outdated.
+    func connect() async throws -> PCVersion {
+        if let v = try? await version(), v.version == Self.protocolVersion { return v }
+        try await installScripts()
+        do { return try await version() } catch {
+            throw ShellError(message: "The queue doesn't run on the render PC. Run setup_windows_pc.ps1 on the PC first.\n\n\(error.localizedDescription)")
+        }
+    }
+
+    /// Copy the app's bundled PC scripts (rq.py, render_job.py, remote_gpu.py, progress.py) to the PC.
+    func installScripts() async throws {
+        guard let src = Bundle.main.resourceURL?.appendingPathComponent("pc") else { return }
+        if !cfg.testDir.isEmpty {
+            let fm = FileManager.default
+            try fm.createDirectory(atPath: cfg.testDir, withIntermediateDirectories: true)
+            for f in try fm.contentsOfDirectory(atPath: src.path) {
+                let dst = cfg.testDir + "/" + f
+                try? fm.removeItem(atPath: dst)
+                try fm.copyItem(atPath: src.path + "/" + f, toPath: dst)
+            }
+            return
+        }
+        let tar = FileManager.default.temporaryDirectory.appendingPathComponent("geysier-pc-\(UUID().uuidString).tar")
+        defer { try? FileManager.default.removeItem(at: tar) }
+        _ = try await Shell.run("/usr/bin/tar", ["-cf", tar.path, "--no-mac-metadata", "--exclude", "__pycache__", "--exclude", ".DS_Store", "-C", src.path, "."])
+        let dir = cfg.queueDir
+        _ = try await Shell.run("/usr/bin/ssh", sshOptions + ["if not exist \"\(dir)\" mkdir \"\(dir)\""])
+        _ = try await Shell.run("/usr/bin/ssh", sshOptions + ["tar -xf - -C \"\(dir.replacingOccurrences(of: "\\", with: "/"))\""],
+                                stdinFile: tar)
+    }
+
+    /// Send a (packed) .blend into the queue; returns the new job id.
+    /// `progress` gets the bytes sent so far.
+    func submit(blend: URL, options: [String: Any], progress: @escaping @Sendable (Int64) -> Void) async throws -> String {
+        let json = try JSONSerialization.data(withJSONObject: options)
+        let b64 = json.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let data = try await rq(["receive", b64], stdinFile: blend, progress: progress)
+        struct Reply: Decodable { let id: String }
+        return try decode(Reply.self, data).id
+    }
+
+    /// A small PNG of the job's first image for notification banners; nil if there's none.
+    func previewThumbnail(_ id: String) async -> URL? {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("blenderrender-previews")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let raw = dir.appendingPathComponent("\(id)-full"), thumb = dir.appendingPathComponent("\(id).png")
+        defer { try? FileManager.default.removeItem(at: raw) }
+        do {
+            _ = try await rq(["preview", id], stdoutFile: raw)
+            _ = try await Shell.run("/usr/bin/sips", ["-s", "format", "png", "-Z", "640", raw.path, "--out", thumb.path])
+            return thumb
+        } catch { return nil }
+    }
+
+    func cancel(_ id: String) async throws { _ = try await rq(["cancel", id]) }
+    func delete(_ id: String) async throws { _ = try await rq(["delete", id]) }
+
+    func log(_ id: String) async throws -> String {
+        struct Reply: Decodable { let log: String }
+        return try decode(Reply.self, try await rq(["log", id])).log
+    }
+
+    /// Size in bytes of the tar `send` streams for a job (an estimate; nil if the PC can't tell).
+    func downloadSize(_ id: String) async -> Int64? {
+        struct Reply: Decodable { let bytes: Int64 }
+        guard let data = try? await rq(["size", id]) else { return nil }
+        return try? JSONDecoder().decode(Reply.self, from: data).bytes
+    }
+
+    /// Download a job's renders into `folder` (created), log.txt included. `progress` gets the bytes received.
+    func download(_ id: String, into folder: URL, progress: (@Sendable (Int64) -> Void)? = nil) async throws -> Int {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("geysier-\(id)-\(UUID().uuidString)")
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+        let tar = tmp.appendingPathComponent("job.tar")
+        _ = try await rq(["send", id], stdoutFile: tar, progress: progress)
+        _ = try await Shell.run("/usr/bin/tar", ["-xf", tar.path, "-C", tmp.path])
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var count = 0
+        let outDir = tmp.appendingPathComponent("out")
+        let items = (try? fm.contentsOfDirectory(atPath: outDir.path)) ?? []
+        for item in items + ["../log.txt"] {
+            let src = outDir.appendingPathComponent(item).standardizedFileURL
+            guard fm.fileExists(atPath: src.path) else { continue }
+            var name = src.lastPathComponent
+            if item != "../log.txt", (name as NSString).pathExtension.isEmpty, let ext = Self.sniffExtension(src) {
+                name += "." + ext  // e.g. a video from a .blend with File Extensions turned off
+            }
+            let dst = folder.appendingPathComponent(name)
+            try? fm.removeItem(at: dst)
+            try fm.moveItem(at: src, to: dst)
+            if item != "../log.txt" { count += 1 }
+        }
+        return count
+    }
+}
+
+extension RenderPC {
+    /// File type from the first bytes, for render outputs that came back without an extension.
+    static func sniffExtension(_ url: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        let b = [UInt8]((try? h.read(upToCount: 16)) ?? Data())
+        guard b.count >= 12 else { return nil }
+        let ascii = { (r: Range<Int>) in String(decoding: b[r], as: UTF8.self) }
+        if ascii(4..<8) == "ftyp" { return ascii(8..<12) == "qt  " ? "mov" : "mp4" }
+        if b[0...3] == [0x89, 0x50, 0x4E, 0x47] { return "png" }
+        if b[0...2] == [0xFF, 0xD8, 0xFF] { return "jpg" }
+        if b[0...3] == [0x76, 0x2F, 0x31, 0x01] { return "exr" }
+        if b[0...3] == [0x1A, 0x45, 0xDF, 0xA3] { return "mkv" }
+        if ascii(0..<4) == "RIFF" && ascii(8..<12) == "AVI " { return "avi" }
+        if b[0...1] == [0x49, 0x49] || b[0...1] == [0x4D, 0x4D] { return "tif" }
+        return nil
+    }
+}
+
+/// What the Mac's own Blender found in a dropped file.
+struct BlendInfo: Decodable {
+    let frame_start: Int
+    let frame_end: Int
+    let frame_current: Int
+    let res_x: Int
+    let res_y: Int
+    let pct: Int
+    let engine: String
+    let samples: Int
+    let camera: String?
+    let video: Bool
+    let missing: [String]
+    let blender: String
+}
+
+enum Packer {
+    /// Pack the file's textures into a temporary copy with the Mac's Blender and read its settings.
+    static func packAndInspect(_ file: URL, cfg: Config) async throws -> (URL, BlendInfo) {
+        guard let script = Bundle.main.resourceURL?.appendingPathComponent("pack_inspect.py") else {
+            throw ShellError(message: "pack_inspect.py missing from the app bundle")
+        }
+        guard FileManager.default.isExecutableFile(atPath: cfg.macBlender) else {
+            throw ShellError(message: "Blender not found at \(cfg.macBlender) (needed to pack the file's textures). Set it in Settings.")
+        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("geysier-pack-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let packed = dir.appendingPathComponent(file.lastPathComponent)
+        let data = try await Shell.run(cfg.macBlender, ["-b", file.path, "--factory-startup", "-P", script.path, "--", packed.path])
+        let text = String(decoding: data, as: UTF8.self)
+        guard let line = text.split(separator: "\n").last(where: { $0.hasPrefix("inspect: ") }),
+              let info = try? JSONDecoder().decode(BlendInfo.self, from: Data(line.dropFirst(9).utf8)),
+              FileManager.default.fileExists(atPath: packed.path) else {
+            throw ShellError(message: "Blender couldn't read \(file.lastPathComponent).\n" + String(text.suffix(600)))
+        }
+        return (packed, info)
+    }
+}
