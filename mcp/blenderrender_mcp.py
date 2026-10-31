@@ -277,6 +277,8 @@ def tool_queue(cfg, args):
                 "pct": int(args.get("resolution_percent") or (min(info["pct"], FAST_PCT) if fast else info["pct"])),
                 "samples": int(args.get("samples") or (min(info["samples"], FAST_SAMPLES) if fast else info["samples"])),
                 "source": packed.name}
+        if not cfg.get("keepAwake", True):
+            opts["keep_awake"] = False
         if mode == "animation":
             opts["start"] = int(args.get("frame_start", info["frame_start"]))
             opts["end"] = int(args.get("frame_end", info["frame_end"]))

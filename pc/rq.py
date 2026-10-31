@@ -46,7 +46,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 8
+VERSION = 9
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
@@ -365,7 +365,29 @@ EOF = object()
 PROGRESS = re.compile(r"^progress: frame=(\d*) sample=(\d+)/(\d+) remaining=(.*)$")
 
 
+def nudge_awake(hold=None):
+    """Tell Windows the PC is in use: once by default, or from now until hold=False on this thread."""
+    if not WIN:
+        return
+    import ctypes
+    continuous, system_required = 0x80000000, 0x00000001
+    flags = system_required if hold is None else continuous | (system_required if hold else 0)
+    ctypes.windll.kernel32.SetThreadExecutionState(flags)
+
+
 def render(d, cfg):
+    """Render a job, keeping the PC from sleeping on its own unless the Mac's setting says otherwise."""
+    hold = read_json(d / "job.json", {}).get("keep_awake", True)
+    if hold:
+        nudge_awake(True)
+    try:
+        render_job(d, cfg)
+    finally:
+        if hold:
+            nudge_awake(False)
+
+
+def render_job(d, cfg):
     job = read_json(d / "job.json")
     (d / "out").mkdir(exist_ok=True)
     blend = cache_path(job["blend"]) if job.get("blend") else d / "input.blend"
@@ -487,6 +509,9 @@ def main():
         cmd_list()
     elif cmd == "stats":
         cmd_stats()
+    elif cmd == "nudge":
+        nudge_awake()
+        out({"ok": True})
     elif cmd == "receive":
         cmd_receive(rest[0])
     elif cmd == "cache-has":

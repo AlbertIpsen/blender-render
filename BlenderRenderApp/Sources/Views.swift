@@ -683,11 +683,11 @@ struct SettingsView: View {
                 Toggle("Download renders automatically when they finish", isOn: $form.value.autoDownload)
             }
             Section {
-                Toggle("Keep Mac alive while rendering", isOn: $form.value.keepAwake)
+                Toggle("Keep all computers awake while rendering", isOn: $form.value.keepAwake)
             } header: {
-                Text("This Mac")
+                Text("Power")
             } footer: {
-                Text("Stops the Mac sleeping on its own while files are sending, jobs are queued or rendering, or renders are downloading. The screen can still turn off.")
+                Text("Stops this Mac and the render PCs sleeping on their own during a render. Screens can still turn off. Shutting a computer down or putting it to sleep by hand still stops it, and a PC that's already asleep can't be reached.")
             }
             Section {
                 TextField("Blender on this Mac", text: $form.value.macBlender)

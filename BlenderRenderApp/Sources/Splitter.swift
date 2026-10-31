@@ -3,7 +3,7 @@ import Foundation
 /// A range of frames one PC renders in one go.
 struct SplitBatch: Codable {
     let start: Int
-    let end: Int
+    var end: Int
     var status = "pending"  // pending, running, done
     var pc: String?
     var jobID: String?
@@ -30,6 +30,8 @@ struct SplitState: Codable {
     var output: String?
     var files: Int?
     var log: [String] = []
+    /// Measured seconds per frame, by PC id; each PC's next batch is cut to fit.
+    var speeds: [String: Double]?
 
     var frameCount: Int { (end - start) / step + 1 }
     var framesDone: Int { batches.filter { $0.status == "done" }.reduce(0) { $0 + frames(in: $1) } }
@@ -38,8 +40,9 @@ struct SplitState: Codable {
 
 private struct BatchFailed: Error { let reason: String }
 
-/// Runs one split job from this Mac: each PC takes the next batch as soon as it's free, so a faster
-/// GPU does more of the work. Batches whose PC drops out go back in line for the others.
+/// Runs one split job from this Mac, which works as the coordinator: a PC that's free asks for work
+/// and gets a batch cut to its measured speed, so a faster GPU does more and no PC holds up the end
+/// for long. Batches whose PC drops out go back in line for the others.
 @MainActor
 final class SplitRun {
     private(set) var state: SplitState
@@ -53,6 +56,12 @@ final class SplitRun {
     private static let attemptLimit = 3
     /// How long a PC may stay silent before its batch goes to another PC.
     private static let silenceLimit = 120.0
+    /// How long a batch should keep a PC busy: longer saves reloading the file, shorter shares more evenly.
+    private static let batchSeconds = 300.0
+    private static let maxBatchFrames = 60
+    private static let busy = "busy with another job"
+    /// Until a PC has been measured.
+    private static let firstBatchFrames = 2
 
     static var root: URL { Config.fileURL.deletingLastPathComponent().appendingPathComponent("splits") }
     private var dir: URL { Self.root.appendingPathComponent(state.id) }
@@ -63,15 +72,6 @@ final class SplitRun {
         self.state = state
         self.cfg = cfg
         self.onChange = onChange
-    }
-
-    /// Batch size balances sharing the work fairly against Blender reloading the file for each batch.
-    static func batches(start: Int, end: Int, step: Int, pcs: Int) -> [SplitBatch] {
-        let frames = (end - start) / step + 1
-        let size = max(1, min(20, frames / (pcs * 6)))
-        return stride(from: start, through: end, by: size * step).map {
-            SplitBatch(start: $0, end: min(end, $0 + (size - 1) * step))
-        }
     }
 
     /// Takes over `packed`, moving it into the job's folder, and starts rendering.
@@ -108,6 +108,12 @@ final class SplitRun {
         }
         cleanUp()
         changed()
+    }
+
+    /// Every PC this job could still use, including those waiting for work.
+    func nudgePCs() {
+        guard cfg.keepAwake, running else { return }
+        for pc in state.pcs { let rpc = rpc(pc); Task { try? await rpc.nudgeAwake() } }
     }
 
     func remove() {
@@ -192,7 +198,16 @@ final class SplitRun {
                 }
                 for job in strays { try? await rpc.delete(job) }
                 strays = []
-                guard running, let i = state.batches.firstIndex(where: { $0.status == "pending" }) else { continue }
+                // Pull, don't push: a batch queued behind other work would sit there while other PCs go idle.
+                if try await rpc.list().jobs.contains(where: \.isActive) {
+                    if activity[pc.id] != Self.busy {
+                        activity[pc.id] = Self.busy
+                        changed()
+                    }
+                    try? await Task.sleep(for: .seconds(5))
+                    continue
+                }
+                guard running, let i = nextBatch(for: pc) else { continue }
                 do {
                     try await render(i, on: rpc, pc: pc)
                     failures = 0
@@ -229,6 +244,22 @@ final class SplitRun {
         activity[pc.id] = nil
     }
 
+    /// The next frames for `pc`: cuts them off the first pending batch and leaves the rest in line.
+    private func nextBatch(for pc: PCEntry) -> Int? {
+        guard let i = state.batches.firstIndex(where: { $0.status == "pending" }) else { return nil }
+        let b = state.batches[i]
+        let measured = state.speeds?[pc.id].map { Int(Self.batchSeconds / max($0, 0.01)) } ?? Self.firstBatchFrames
+        let waiting = state.batches.filter { $0.status == "pending" }.reduce(0) { $0 + state.frames(in: $1) }
+        let fairShare = Int((Double(waiting) / Double(state.pcs.count)).rounded(.up))
+        let frames = max(1, min(measured, Self.maxBatchFrames, fairShare))
+        if frames < state.frames(in: b) {
+            let cut = b.start + frames * state.step
+            state.batches[i].end = cut - state.step
+            state.batches.append(SplitBatch(start: cut, end: b.end))
+        }
+        return i
+    }
+
     private func release(_ i: Int) {
         state.batches[i].status = "pending"
         state.batches[i].pc = nil
@@ -257,6 +288,8 @@ final class SplitRun {
                                    "pct": state.pct, "samples": state.samples, "step": state.step,
                                    "frames_only": true, "parent": state.id, "blend": state.id]
         if state.fast { opts["fast"] = true }
+        if !cfg.keepAwake { opts["keep_awake"] = false }
+        let sent = Date()
         let job = try await rpc.submitBatch(options: opts)
         guard running else {  // cancelled while this was on its way, so cancel() didn't know its id
             try? await rpc.delete(job)
@@ -275,6 +308,10 @@ final class SplitRun {
                     batchProgress[i] = found?.progress ?? 0
                     onChange()
                 case "done":
+                    let perFrame = Date().timeIntervalSince(sent) / Double(state.frames(in: b))
+                    var speeds = state.speeds ?? [:]
+                    speeds[pc.id] = speeds[pc.id].map { ($0 + perFrame) / 2 } ?? perFrame
+                    state.speeds = speeds
                     try await collect(i, job: job, on: rpc)
                     return
                 case "failed":
@@ -383,6 +420,7 @@ final class SplitManager {
 
     var jobs: [PCJob] { runs.map(\.job) }
     var isActive: Bool { runs.contains { $0.state.state == "rendering" } }
+    func nudgePCs() { runs.forEach { $0.nudgePCs() } }
     func run(_ jobID: String) -> SplitRun? { runs.first { $0.job.id == jobID } }
 
     /// Pick up jobs from a previous launch; unfinished ones carry on where they stopped.
@@ -404,7 +442,7 @@ final class SplitManager {
         let state = SplitState(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
                                name: s.name, start: s.start, end: s.end, step: step, pct: s.pct, samples: s.samples,
                                fast: s.fast, video: s.info.video, pcs: pcs, submitted: Date().timeIntervalSince1970,
-                               batches: SplitRun.batches(start: s.start, end: s.end, step: step, pcs: pcs.count))
+                               batches: [SplitBatch(start: s.start, end: s.end)])
         let run = SplitRun(state: state, cfg: cfg, onChange: onChange)
         runs.append(run)
         try run.begin(packed: s.packed)

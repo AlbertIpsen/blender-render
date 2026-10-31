@@ -103,6 +103,12 @@ final class AppState: ObservableObject {
             }
         }
         Task { [weak self] in
+            while !Task.isCancelled {
+                self?.splits.nudgePCs()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+        Task { [weak self] in
             self?.clearOldInbox()
             while !Task.isCancelled {
                 self?.checkInbox()
@@ -224,6 +230,11 @@ final class AppState: ObservableObject {
     func splitBatchesDone(on id: String) -> Int {
         splits.runs.filter { $0.state.state == "rendering" }
             .reduce(0) { $0 + $1.state.batches.filter { $0.pc == id && $0.status == "done" }.count }
+    }
+
+    /// Seconds per frame this PC is managing on a running split job.
+    func splitSpeed(on id: String) -> Double? {
+        splits.runs.last { $0.state.state == "rendering" }?.state.speeds?[id]
     }
 
     /// PCs that can share an animation made in `blender`: switched on, online and on the same version.
@@ -385,6 +396,7 @@ final class AppState: ObservableObject {
         update(s.id) { $0.phase = .uploading; $0.transfer = Transfer(total: size) }
         var opts: [String: Any] = ["name": s.name, "mode": s.isAnimation ? "animation" : "still",
                                    "pct": s.pct, "samples": s.samples, "source": s.packed.lastPathComponent]
+        if !cfg.keepAwake { opts["keep_awake"] = false }
         if s.isAnimation {
             opts["start"] = s.start; opts["end"] = s.end
             if s.fast { opts["step"] = JobSetup.fastStep; opts["fast"] = true }

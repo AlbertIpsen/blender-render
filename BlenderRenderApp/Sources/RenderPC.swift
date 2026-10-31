@@ -195,7 +195,7 @@ struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: Strin
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 8
+    static let protocolVersion = 9
     let cfg: Config
 
     private var sshOptions: [String] {
@@ -225,6 +225,8 @@ struct RenderPC {
     func version() async throws -> PCVersion { try decode(PCVersion.self, try await rq(["version"])) }
     func list() async throws -> PCList { try decode(PCList.self, try await rq(["list"])) }
     func stats() async throws -> PCStats { try decode(PCStats.self, try await rq(["stats"])) }
+    /// Counts as activity on the PC, so it doesn't sleep between batches of a split job.
+    func nudgeAwake() async throws { _ = try await rq(["nudge"]) }
 
     /// Connect, installing or updating the queue scripts on the PC when they're missing or outdated.
     func connect() async throws -> PCVersion {

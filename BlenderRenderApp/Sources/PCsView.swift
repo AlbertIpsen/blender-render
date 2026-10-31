@@ -25,7 +25,7 @@ struct PCCards: View {
         VStack(spacing: 12) {
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
-                       batchesDone: state.splitBatchesDone(on: pc.id), isMain: pc.id == "main")
+                       batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id), isMain: pc.id == "main")
             }
         }
         .task { await state.watchPCs() }
@@ -37,6 +37,7 @@ struct PCCard: View {
     let version: PCVersion?
     let live: PCLive?
     let batchesDone: Int
+    let speed: Double?
     let isMain: Bool
 
     private var online: Bool { version != nil && live?.error == nil }
@@ -158,6 +159,7 @@ struct PCCard: View {
         if done > 0 { parts.append("\(done) finished") }
         if failed > 0 { parts.append("\(failed) failed") }
         if batchesDone > 0 { parts.append("\(batchesDone) split \(batchesDone == 1 ? "batch" : "batches") done here") }
+        if let speed { parts.append(String(format: "%.1f s per frame", speed)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
