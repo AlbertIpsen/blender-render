@@ -47,12 +47,10 @@ struct Config: Codable, Equatable {
     var extraPCs: [PCEntry] = []
     /// Whether the PC above helps with split animations.
     var mainPCInSplits = true
-    /// Whether this Mac itself is ticked for split jobs (it's always there to choose).
-    var macInSplits = false
 
     /// The PC above and any extras, in the shape split jobs use.
     var allPCs: [PCEntry] {
-        let mac = PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: macInSplits,
+        let mac = PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: true,
                           testDir: Self.thisMacDir)
         guard isConfigured else { return extraPCs + [mac] }
         return [PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
@@ -104,7 +102,6 @@ struct Config: Codable, Equatable {
         autoDownload = try c.decodeIfPresent(Bool.self, forKey: .autoDownload) ?? d.autoDownload
         extraPCs = try c.decodeIfPresent([PCEntry].self, forKey: .extraPCs) ?? d.extraPCs
         mainPCInSplits = try c.decodeIfPresent(Bool.self, forKey: .mainPCInSplits) ?? d.mainPCInSplits
-        macInSplits = try c.decodeIfPresent(Bool.self, forKey: .macInSplits) ?? d.macInSplits
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
     }
 }

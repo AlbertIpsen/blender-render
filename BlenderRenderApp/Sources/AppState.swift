@@ -247,22 +247,27 @@ final class AppState: ObservableObject {
         splits.runs.last { $0.state.state == "rendering" }?.state.speeds?[id]
     }
 
-    /// The PCs ticked for split jobs in Settings that can share an animation made in `blender`.
-    func splitPCs(blender: String) -> [PCEntry] {
-        cfg.allPCs.filter { $0.enabled && canShare($0, blender: blender) }
-    }
-
     /// Online, switched on, and on the same Blender major.minor as the file.
     func canShare(_ pc: PCEntry, blender: String) -> Bool {
         guard let v = pcVersions[pc.id], v.off != true else { return false }
         return Self.majorMinor(v.blender_version ?? "") == Self.majorMinor(blender)
     }
 
-    /// Ticked when a job is added: the split PCs for an animation, else the main PC.
+    /// Switched on when a job is added: the PCs the last job got, or every PC but this Mac the first
+    /// time. A still renders on one.
     func defaultPCs(blender: String, animation: Bool) -> [String] {
-        let split = splitPCs(blender: blender)
-        if animation && split.count >= 2 { return split.map(\.id) }
-        return [singlePCs().first?.id ?? "main"]
+        let available = singlePCs().map(\.id)
+        var picked = (UserDefaults.standard.stringArray(forKey: Self.lastPCsKey) ?? []).filter(available.contains)
+        if picked.isEmpty { picked = available.filter { $0 != "mac" } }
+        if picked.isEmpty { picked = available }
+        return animation ? picked : [picked.first ?? "main"]
+    }
+
+    private static let lastPCsKey = "lastPCs"
+
+    /// What Start used, as the next job's starting point.
+    private func remember(_ pcs: [String]) {
+        if !pcs.isEmpty { UserDefaults.standard.set(pcs, forKey: Self.lastPCsKey) }
     }
 
     // MARK: PCs of a split job that hasn't started
@@ -306,15 +311,6 @@ final class AppState: ObservableObject {
     private func rpc(for job: PCJob) -> RenderPC {
         guard let id = job.pc, id != "main", let pc = cfg.allPCs.first(where: { $0.id == id }) else { return pc }
         return RenderPC(cfg: cfg.config(for: pc))
-    }
-
-    /// PCs left out of a split because their Blender differs, for the message in the add sheet.
-    func mismatchedPCs(blender: String) -> [String] {
-        let wanted = Self.majorMinor(blender)
-        return cfg.allPCs.filter { pc in
-            guard pc.enabled, let v = pcVersions[pc.id] else { return false }
-            return Self.majorMinor(v.blender_version ?? "") != wanted
-        }.map(\.displayName)
     }
 
     private func refreshJobs() {
@@ -521,6 +517,7 @@ final class AppState: ObservableObject {
     private func launch(_ h: HeldJob) {
         var s = h.setup
         if s.pcs.isEmpty { s.pcs = defaultPCs(blender: h.info.blender, animation: h.isAnimation) }
+        if h.isAnimation { remember(s.pcs) }
         let chosen = cfg.allPCs.filter { s.pcs.contains($0.id) }
         let sharing = chosen.filter { canShare($0, blender: s.info.blender) }
         if s.isAnimation && sharing.count >= 2 {

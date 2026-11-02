@@ -404,10 +404,10 @@ struct JobRow: View {
                     .foregroundStyle(job.state == "failed" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                     .lineLimit(2)
                 if let t = state.downloads[job.id] { DownloadProgress(transfer: t) }
+                if choosesPCs { pcSwitches.padding(.top, 4) }
             }
             Spacer(minLength: 12)
             secondaryActions.opacity(hovering.value ? 1 : 0)
-            if job.held == true || (job.split == true && state.canChangePCs(job)) { pcsMenu }
             primaryAction
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
@@ -433,25 +433,31 @@ struct JobRow: View {
         }
     }
 
-    /// Which PCs render the job: while it waits for Start, or a split job until its first batch.
-    private var pcsMenu: some View {
+    /// While it waits for Start, or a split job until its first batch.
+    private var choosesPCs: Bool { job.held == true || (job.split == true && state.canChangePCs(job)) }
+
+    /// A switch for each PC that could render the job.
+    private var pcSwitches: some View {
         let isHeld = job.held == true
         let ids = isHeld ? state.heldPCIDs(job) : state.splitPCIDs(job)
         let blender = isHeld ? state.heldBlender(job) : state.splitBlender(job)
         let offered = isHeld ? state.singlePCs() + state.cfg.allPCs.filter { ids.contains($0.id) && !state.singlePCs().contains($0) }
                              : state.cfg.allPCs.filter { ids.contains($0.id) || state.canShare($0, blender: blender) }
-        return Menu {
-            ForEach(offered) { pc in
-                Toggle(state.pcName(pc) + pcNote(pc, blender: blender, isHeld: isHeld),
-                       isOn: Binding(get: { ids.contains(pc.id) },
-                                     set: { isHeld ? state.setHeldPC(job, pc, on: $0) : state.setSplitPC(job, pc, on: $0) }))
+        let switches = ForEach(offered) { pc in
+            HStack(spacing: 6) {
+                Toggle(state.pcName(pc), isOn: Binding(get: { ids.contains(pc.id) },
+                                                       set: { isHeld ? state.setHeldPC(job, pc, on: $0) : state.setSplitPC(job, pc, on: $0) }))
+                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
                     .disabled(ids == [pc.id])  // at least one
+                Text(state.pcName(pc)) + Text(pcNote(pc, blender: blender, isHeld: isHeld)).foregroundColor(.secondary)
             }
-        } label: {
-            Label("\(ids.count) PC\(ids.count == 1 ? "" : "s")", systemImage: "desktopcomputer")
+            .help(ids == [pc.id] ? "A job needs at least one PC." : "Render this job on \(state.pcName(pc)).")
         }
-        .menuStyle(.button).controlSize(.small).fixedSize()
-        .help("Choose the PCs that render this job. You can change them until it starts.")
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) { switches }
+            VStack(alignment: .leading, spacing: 6) { switches }
+        }
+        .font(.callout)
     }
 
     private func pcNote(_ pc: PCEntry, blender: String, isHeld: Bool) -> String {
@@ -529,8 +535,8 @@ struct JobRow: View {
         case "held":
             if job.held != true { return "Sent straight to \(state.pcName(of: job) ?? "the PC"); press Start to render it there" }
             let names = state.cfg.allPCs.filter { state.heldPCIDs(job).contains($0.id) }.map(state.pcName)
-            if names.isEmpty { return "Choose the PCs, then press Start" }
-            return (names.count > 1 && job.mode == "animation" ? "Split between " : "On ") + names.joined(separator: ", ")
+            if names.isEmpty { return "Switch on a PC, then press Start" }
+            return (names.count > 1 && job.mode == "animation" ? "Split between \(names.count) PCs" : "Whole job on \(names[0])")
                 + " · press Start when you're ready"
         case "done":
             let n = job.files ?? 0
@@ -726,16 +732,6 @@ struct SettingsView: View {
     @StateObject private var loaded = Box(false)
     @StateObject private var addingPC = Box(false)
 
-    private func pcEnabled(_ pc: PCEntry) -> Binding<Bool> {
-        Binding {
-            pc.id == "main" ? form.value.mainPCInSplits : pc.id == "mac" ? form.value.macInSplits : pc.enabled
-        } set: { on in
-            if pc.id == "main" { form.value.mainPCInSplits = on }
-            else if pc.id == "mac" { form.value.macInSplits = on }
-            else if let i = form.value.extraPCs.firstIndex(where: { $0.id == pc.id }) { form.value.extraPCs[i].enabled = on }
-        }
-    }
-
     var body: some View {
         Form {
             Section {
@@ -749,8 +745,6 @@ struct SettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Toggle("Split jobs", isOn: pcEnabled(pc)).toggleStyle(.checkbox)
-                            .help("Takes part when an animation is split between PCs")
                         if pc.id != "main" && pc.id != "mac" {
                             Button { form.value.extraPCs.removeAll { $0.id == pc.id } } label: { Image(systemName: "trash") }
                                 .buttonStyle(.borderless).help("Remove this PC")
@@ -762,7 +756,7 @@ struct SettingsView: View {
                 Text("Render PCs")
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("When you add a job, you send it whole to one PC (the main one unless you pick another) or split it between the PCs ticked for split jobs. A split needs this Mac on until it's done; a job on one PC doesn't.")
+                    Text("Each job waits in the queue until you switch on its PCs and press Start: one PC renders the whole job, two or more split an animation. A split needs this Mac on until it's done; a job on one PC doesn't.")
                     Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
                 }
             }

@@ -89,12 +89,11 @@ struct PCCard: View {
         return active.isEmpty ? "Ready" : "Starting…"
     }
 
-    /// "192.168.1.130 · arthu · Blender 5.2.1 · Main PC · In splits"
+    /// "192.168.1.130 · arthu · Blender 5.2.1 · Main PC"
     private var identity: String {
         var parts = [pc.host, pc.user]
         if let b = version?.blender_version, !b.isEmpty { parts.append("Blender " + b) }
         if isMain { parts.append("Main PC") }
-        parts.append(pc.enabled ? "In splits" : "Not in splits")
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
