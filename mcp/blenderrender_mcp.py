@@ -153,6 +153,8 @@ def split_jobs():
                "started": s["submitted"], "ended": s.get("ended"), "error": s.get("error"), "files": s.get("files", 0),
                "progress": done / frames, "output": s.get("output"), "log_lines": s.get("log", []),
                "split_across": [p.get("name") or p.get("host") for p in s["pcs"]], "frames_done": "%d of %d" % (done, frames)}
+        if s["state"] == "rendering" and not done and not any(b["status"] == "running" for b in s["batches"]):
+            job["state"] = "queued"
         if s["state"] == "rendering" and done:
             job["eta"] = (time.time() - s["submitted"]) / done * (frames - done)
             job["eta_at"] = time.time()

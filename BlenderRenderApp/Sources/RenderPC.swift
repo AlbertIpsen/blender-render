@@ -132,6 +132,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
     var split: Bool?
     /// What a split job's PCs are doing, shown in place of the frame and sample line.
     var note: String?
+    /// Which PC the job is on (PCEntry id), filled in by this app; nil for a split job.
+    var pc: String?
 
     /// Seconds left right now, counting down between updates from the PC.
     func secondsLeft(at now: Date = Date()) -> Double? {

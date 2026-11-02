@@ -51,6 +51,9 @@ final class SplitRun {
     private var batchProgress: [Int: Double] = [:]
     private var activity: [String: String] = [:]
     private var supervisor: Task<Void, Never>?
+    /// PCs that failed too often and sit out the rest of this job.
+    /// Whether a job ahead of this one in the queue still has frames for this PC.
+    var workAhead: () -> Bool = { false }
     /// Batches in a row that a PC has to fail before it sits out the rest of the job.
     private static let pcFailureLimit = 2
     private static let attemptLimit = 3
@@ -128,7 +131,7 @@ final class SplitRun {
         var j = PCJob(id: "split-" + state.id)
         j.name = state.name
         j.mode = "animation"
-        j.state = state.state
+        j.state = isWaiting ? "queued" : state.state
         j.start = state.start
         j.end = state.end
         j.step = state.step
@@ -141,7 +144,7 @@ final class SplitRun {
         j.split = true
         let done = Double(state.framesDone) + batchProgress.reduce(0.0) { $0 + $1.value * Double(state.frames(in: state.batches[$1.key])) }
         j.progress = state.state == "done" ? 1 : min(1, done / Double(state.frameCount))
-        if state.state == "rendering" {
+        if state.state == "rendering" && !isWaiting {
             let now = Date().timeIntervalSince1970
             if done >= 1 {
                 j.eta = (now - state.submitted) / done * (Double(state.frameCount) - done)
@@ -151,6 +154,17 @@ final class SplitRun {
             j.note = (["\(state.framesDone) of \(state.frameCount) frames"] + working).joined(separator: " · ")
         }
         return j
+    }
+
+    /// Not started: every PC is on something else. Once frames are in, a pause doesn't move it back.
+    private var isWaiting: Bool {
+        running && state.framesDone == 0 && !state.batches.contains { $0.status == "running" }
+            && activity.values.allSatisfy { $0 == Self.busy }
+    }
+
+    /// True while any PC still has frames of this job to render; later jobs wait until then.
+    var holdsPCs: Bool {
+        running && state.batches.contains { $0.status != "done" }
     }
 
     // MARK: running
@@ -182,6 +196,12 @@ final class SplitRun {
         while running && !allDone {
             guard state.batches.contains(where: { $0.status == "pending" }) else {
                 try? await Task.sleep(for: .seconds(3))  // another PC might still hand one back
+                continue
+            }
+            guard !workAhead() else {  // one job at a time, in queue order; this one doesn't even need the file yet
+                activity[pc.id] = nil
+                onChange()
+                try? await Task.sleep(for: .seconds(3))
                 continue
             }
             do {
@@ -423,17 +443,24 @@ final class SplitManager {
     func nudgePCs() { runs.forEach { $0.nudgePCs() } }
     func run(_ jobID: String) -> SplitRun? { runs.first { $0.job.id == jobID } }
 
+    private func make(_ state: SplitState, cfg: Config) -> SplitRun {
+        let run = SplitRun(state: state, cfg: cfg, onChange: onChange)
+        run.workAhead = { [weak self, unowned run] in
+            self?.runs.contains { $0 !== run && $0.state.submitted < run.state.submitted && $0.holdsPCs } ?? false
+        }
+        return run
+    }
+
     /// Pick up jobs from a previous launch; unfinished ones carry on where they stopped.
     func restore(cfg: Config) {
         let fm = FileManager.default
         for name in (try? fm.contentsOfDirectory(atPath: SplitRun.root.path)) ?? [] {
             let file = SplitRun.root.appendingPathComponent(name).appendingPathComponent("state.json")
             guard let data = try? Data(contentsOf: file), let state = try? JSONDecoder().decode(SplitState.self, from: data) else { continue }
-            let run = SplitRun(state: state, cfg: cfg, onChange: onChange)
-            runs.append(run)
-            if state.state == "rendering" { run.resume() }
+            runs.append(make(state, cfg: cfg))
         }
         runs.sort { $0.state.submitted < $1.state.submitted }
+        for run in runs where run.state.state == "rendering" { run.resume() }
     }
 
     /// Returns the new job's id.
@@ -443,7 +470,7 @@ final class SplitManager {
                                name: s.name, start: s.start, end: s.end, step: step, pct: s.pct, samples: s.samples,
                                fast: s.fast, video: s.info.video, pcs: pcs, submitted: Date().timeIntervalSince1970,
                                batches: [SplitBatch(start: s.start, end: s.end)])
-        let run = SplitRun(state: state, cfg: cfg, onChange: onChange)
+        let run = make(state, cfg: cfg)
         runs.append(run)
         try run.begin(packed: s.packed)
         onChange()

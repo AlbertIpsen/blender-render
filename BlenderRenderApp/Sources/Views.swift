@@ -156,7 +156,6 @@ struct SetUpPCView: View {
 struct ConnectionPill: View {
     @EnvironmentObject var state: AppState
     @Environment(\.openSettings) private var openSettings
-    @Environment(\.openWindow) private var openWindow
     @StateObject private var showing = Box(false)
 
     var body: some View {
@@ -181,8 +180,6 @@ struct ConnectionPill: View {
                             .font(.callout).foregroundStyle(state.pcVersions[pc.id] == nil ? .secondary : .primary)
                     }
                 }
-                Button("Show PC Details…") { openWindow(id: "pcs"); showing.value = false }
-                    .buttonStyle(.link)
                 Divider()
                 HStack {
                     Button("Reconnect") { state.reconnect(); showing.value = false }
@@ -472,7 +469,7 @@ struct JobRow: View {
 
     private var kind: String {
         var parts = [job.mode == "animation" ? "Frames \(job.start ?? 0)–\(job.end ?? 0)" : "Still"]
-        if job.split == true { parts.append("Split across PCs") }
+        if job.split == true { parts.append("Split across PCs") } else if let pc = state.pcName(of: job) { parts.append("On \(pc)") }
         if let n = job.step, n > 1 { parts.append("Fast preview (every \(n)th)") }
         if let p = job.pct { parts.append("\(p)%") }
         return parts.joined(separator: " · ")
@@ -523,6 +520,20 @@ struct SetupSheet: View {
     init(setup: JobSetup) { _form = StateObject(wrappedValue: Box(setup)) }
     private var setup: JobSetup { form.value }
     private var pcCount: Int { state.splitPCs(blender: setup.info.blender).count }
+    private var canSplit: Bool { setup.isAnimation && pcCount >= 2 }
+    private var splitting: Bool { canSplit && setup.split }
+    private var showTarget: Bool { canSplit || state.singlePCs().count > 1 }
+    /// "split", or the id of the PC that gets the whole job.
+    private var target: Binding<String> {
+        Binding(get: { splitting ? "split" : setup.pc },
+                set: { v in
+                    form.value.split = v == "split"
+                    if v != "split" { form.value.pc = v }
+                })
+    }
+    private var targetName: String {
+        state.singlePCs().first { $0.id == setup.pc }.map(state.pcName) ?? "the main PC"
+    }
     private var mismatched: [String] { state.mismatchedPCs(blender: setup.info.blender) }
 
     var body: some View {
@@ -570,9 +581,6 @@ struct SetupSheet: View {
                         Stepper(value: $form.value.end, in: setup.start...100000) {
                             LabeledContent("Last frame", value: "\(setup.end)")
                         }
-                        if pcCount >= 2 {
-                        Toggle("Split across \(pcCount) PCs", isOn: $form.value.split)
-                    }
                     Toggle("Fast preview", isOn: Binding(get: { setup.fast }, set: { on in
                             form.value.fast = on
                             if on {  // preview size and samples; still adjustable below
@@ -585,6 +593,12 @@ struct SetupSheet: View {
                             LabeledContent("Frame", value: "\(setup.frame)")
                         }
                     }
+                    if showTarget {
+                        Picker("Render on", selection: target) {
+                            if canSplit { Text("Split across \(pcCount) PCs").tag("split") }
+                            ForEach(state.singlePCs()) { pc in Text(state.pcName(pc)).tag(pc.id) }
+                        }
+                    }
                 } footer: {
                     if setup.isAnimation && !mismatched.isEmpty {
                         Text("Not used, different Blender version from this Mac: \(mismatched.joined(separator: ", ")).")
@@ -593,6 +607,10 @@ struct SetupSheet: View {
                         Text("Every \(JobSetup.fastStep)th frame: \((setup.end - setup.start) / JobSetup.fastStep + 1) of \(setup.end - setup.start + 1) frames, about \(JobSetup.fastStep)× faster. Same look as the final render; the video keeps its length but plays at a lower frame rate.")
                     } else if setup.isAnimation {
                         Text("\(setup.end - setup.start + 1) frames, saved as " + (i.video ? "a video in the file's output format." : "numbered PNG files."))
+                    }
+                    if showTarget {
+                        Text(splitting ? "This Mac hands out the frames and joins them, so keep it on until the job is done."
+                             : "Renders start to finish on \(targetName), so you can shut this Mac down and download it when you're back.")
                     }
                 }
                 Section {
@@ -608,7 +626,7 @@ struct SetupSheet: View {
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
-            .frame(height: setup.isAnimation ? (pcCount >= 2 ? 345 : 300) : 190)
+            .frame(height: (setup.isAnimation ? 300 : 190) + (showTarget ? 70 : 0))
             .monospacedDigit()
 
             HStack {
@@ -645,22 +663,16 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("Address", text: $form.value.host, prompt: Text("192.168.1.50"))
-                TextField("Windows user", text: $form.value.user)
-                TextField("Queue folder", text: $form.value.queueDir)
-            } header: {
-                Text("Render PC")
-            } footer: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("The values setup_windows_pc.ps1 printed on the PC. This Mac signs in with its SSH key, so there's no password.")
-                    Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
-                }
-            }
-            Section {
                 ForEach(form.value.allPCs) { pc in
-                    HStack {
+                    HStack(spacing: 10) {
                         Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : .green).frame(width: 8, height: 8)
-                        Toggle(pc.displayName, isOn: pcEnabled(pc))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(state.pcName(pc) + (pc.id == "main" ? "  ·  Main" : ""))
+                            Text(pc.testDir.isEmpty ? pc.host : "Test folder").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("Split jobs", isOn: pcEnabled(pc)).toggleStyle(.checkbox)
+                            .help("Takes part when an animation is split between PCs")
                         if pc.id != "main" {
                             Button { form.value.extraPCs.removeAll { $0.id == pc.id } } label: { Image(systemName: "trash") }
                                 .buttonStyle(.borderless).help("Remove this PC")
@@ -669,9 +681,12 @@ struct SettingsView: View {
                 }
                 Button("Add PC…") { addingPC.value = true }
             } header: {
-                Text("PCs That Share Animations")
+                Text("Render PCs")
             } footer: {
-                Text("With two or more PCs switched on, animations can be split between them. This Mac hands out the frames, so it has to stay on until the job is done. Stills and everything else render on the PC above.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("When you add a job, you send it whole to one PC (the main one unless you pick another) or split it between the PCs ticked for split jobs. A split needs this Mac on until it's done; a job on one PC doesn't.")
+                    Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
+                }
             }
             Section("Downloads") {
                 LabeledContent("Save renders to") {
@@ -690,12 +705,15 @@ struct SettingsView: View {
                 Text("Stops this Mac and the render PCs sleeping on their own during a render. Screens can still turn off. Shutting a computer down or putting it to sleep by hand still stops it, and a PC that's already asleep can't be reached.")
             }
             Section {
+                TextField("Main PC address", text: $form.value.host, prompt: Text("192.168.1.50"))
+                TextField("Main PC Windows user", text: $form.value.user)
+                TextField("Main PC queue folder", text: $form.value.queueDir)
                 TextField("Blender on this Mac", text: $form.value.macBlender)
                 TextField("Test folder", text: $form.value.testDir, prompt: Text("Empty – use the render PC"))
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("Blender on this Mac packs each file's textures before upload. A test folder makes this Mac act as the render PC.")
+                Text("Add PC… fills in the main PC's details. Blender on this Mac packs each file's textures before upload. A test folder makes this Mac act as the render PC.")
             }
         }
         .formStyle(.grouped)

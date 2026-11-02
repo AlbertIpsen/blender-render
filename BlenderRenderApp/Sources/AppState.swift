@@ -27,6 +27,8 @@ struct JobSetup: Identifiable {
     var fast = false
     /// Share the frames between all PCs that can take part.
     var split = true
+    /// Otherwise the whole job goes to this PC (PCEntry id).
+    var pc = "main"
     /// Render every Nth frame, when something other than `fast` chose it (the Claude connector).
     var step: Int?
 
@@ -61,7 +63,10 @@ final class AppState: ObservableObject {
     private var lastPCLook = Date.distantPast
 
     private var connected = false
-    private var pcJobs: [PCJob] = []
+    /// Last list from each PC, by PCEntry id; an unreachable PC keeps what it last reported.
+    private var jobsByPC: [String: [PCJob]] = [:]
+    private var pcJobs: [PCJob] { cfg.allPCs.flatMap { jobsByPC[$0.id] ?? [] } }
+    private var otherPollTask: Task<Void, Never>?
     private lazy var splits = SplitManager { [weak self] in self?.refreshJobs() }
     private var pollTask: Task<Void, Never>?
     private var pcsChecked = false
@@ -167,7 +172,7 @@ final class AppState: ObservableObject {
         cfg = new
         cfg.save()
         connected = false
-        pcJobs = []
+        jobsByPC = [:]
         refreshJobs()
         startPolling()
         Task { await checkPCs() }
@@ -250,6 +255,28 @@ final class AppState: ObservableObject {
         version.split(separator: ".").prefix(2).joined(separator: ".")
     }
 
+    /// PCs a whole job can go to: the main one, and any other that's answering.
+    func singlePCs() -> [PCEntry] {
+        cfg.allPCs.filter { $0.id == "main" || pcVersions[$0.id] != nil }
+    }
+
+    /// The PC's own name, or its Windows computer name when none was given.
+    func pcName(_ pc: PCEntry) -> String {
+        pc.name.isEmpty ? pcVersions[pc.id]?.host ?? pc.displayName : pc.displayName
+    }
+
+    /// Which PC a job is on, for the row; nil while there's only one PC.
+    func pcName(of job: PCJob) -> String? {
+        guard cfg.allPCs.count > 1, let id = job.pc, let pc = cfg.allPCs.first(where: { $0.id == id }) else { return nil }
+        return pcName(pc)
+    }
+
+    /// The PC holding this job.
+    private func rpc(for job: PCJob) -> RenderPC {
+        guard let id = job.pc, id != "main", let pc = cfg.allPCs.first(where: { $0.id == id }) else { return pc }
+        return RenderPC(cfg: cfg.config(for: pc))
+    }
+
     /// PCs left out of a split because their Blender differs, for the message in the add sheet.
     func mismatchedPCs(blender: String) -> [String] {
         let wanted = Self.majorMinor(blender)
@@ -275,6 +302,33 @@ final class AppState: ObservableObject {
                 try? await Task.sleep(for: .seconds(wait))
             }
         }
+        otherPollTask?.cancel()
+        otherPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollOtherPCs()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    /// Jobs sent whole to a PC other than the main one. Separate from `poll`, so a PC that's
+    /// switched off doesn't slow the main queue down.
+    private func pollOtherPCs() async {
+        let cfg = self.cfg
+        let others = cfg.allPCs.filter { $0.id != "main" }
+        let results = await withTaskGroup(of: (String, [PCJob]?).self) { group in
+            for pc in others {
+                group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).list().jobs) }
+            }
+            return await group.reduce(into: [(String, [PCJob]?)]()) { $0.append($1) }
+        }
+        guard cfg.allPCs == self.cfg.allPCs else { return }  // settings changed meanwhile
+        for (id, jobs) in results {
+            guard let jobs else { continue }
+            jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
+        }
+        for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) && id != "main" { jobsByPC[id] = nil }
+        refreshJobs()
     }
 
     /// One refresh; returns seconds until the next one.
@@ -295,7 +349,7 @@ final class AppState: ObservableObject {
             where downloaded[id] == nil {
                 downloaded[id] = path
             }
-            pcJobs = list.jobs.filter { $0.parent == nil }  // batches show as their split job
+            jobsByPC["main"] = list.jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = "main"; return j }  // batches show as their split job
             refreshJobs()
             if case .online(let host, let gpu, _) = status {
                 status = .online(host: host, gpu: list.gpu?.isEmpty == false ? list.gpu! : gpu, worker: list.worker)
@@ -326,7 +380,7 @@ final class AppState: ObservableObject {
         startPolling()
     }
 
-    func refreshSoon() { Task { _ = await poll() } }
+    func refreshSoon() { Task { _ = await poll(); await pollOtherPCs() } }
 
     private func notifyChanges(old: [PCJob], new: [PCJob]) {
         guard !old.isEmpty else { return }
@@ -341,7 +395,7 @@ final class AppState: ObservableObject {
                 }
             case "done":
                 if cfg.autoDownload && (job.files ?? 0) > 0 && downloaded[job.id] == nil { download(job, reveal: false) }
-                let pc = self.pc, gpu = currentGPU
+                let pc = rpc(for: job), gpu = job.pc == "main" || job.pc == nil ? currentGPU : pcVersions[job.pc!]?.gpu ?? ""
                 Task {
                     let preview = await pc.previewThumbnail(job.id)
                     Notifier.shared.renderDone(job, gpu: gpu, preview: preview)
@@ -401,7 +455,8 @@ final class AppState: ObservableObject {
             opts["start"] = s.start; opts["end"] = s.end
             if s.fast { opts["step"] = JobSetup.fastStep; opts["fast"] = true }
         } else { opts["frame"] = s.frame }
-        let pc = self.pc, id = s.id
+        let target = singlePCs().first { $0.id == s.pc } ?? cfg.allPCs.first { $0.id == "main" }
+        let pc = target.map { RenderPC(cfg: cfg.config(for: $0)) } ?? self.pc, id = s.id
         Task {
             do {
                 _ = try await pc.submit(blend: s.packed, options: opts, progress: ByteMeter { n in
@@ -501,7 +556,7 @@ final class AppState: ObservableObject {
 
     func cancel(_ job: PCJob) {
         if let run = splits.run(job.id) { return run.cancel() }
-        let pc = self.pc
+        let pc = rpc(for: job)
         Task {
             do { try await pc.cancel(job.id) } catch { alert = error.localizedDescription }
             refreshSoon()
@@ -510,7 +565,7 @@ final class AppState: ObservableObject {
 
     func remove(_ job: PCJob) {
         if let run = splits.run(job.id) { return splits.remove(run) }
-        let pc = self.pc
+        let pc = rpc(for: job)
         Task {
             do { try await pc.delete(job.id) } catch { alert = error.localizedDescription }
             refreshSoon()
@@ -524,7 +579,7 @@ final class AppState: ObservableObject {
         let safe = job.displayName.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         let stamp = job.id.split(separator: "-").prefix(2).joined(separator: "-")
         let folder = URL(fileURLWithPath: cfg.downloadDir).appendingPathComponent("\(safe) \(stamp)")
-        let pc = self.pc
+        let pc = rpc(for: job)
         Task {
             defer { downloads[job.id] = nil }
             do {
@@ -554,6 +609,6 @@ final class AppState: ObservableObject {
 
     func log(_ job: PCJob) async -> String {
         if let run = splits.run(job.id) { return run.logText }
-        do { return try await pc.log(job.id) } catch { return error.localizedDescription }
+        do { return try await rpc(for: job).log(job.id) } catch { return error.localizedDescription }
     }
 }
