@@ -52,6 +52,8 @@ final class SplitRun {
     private let onChange: () -> Void
     private var batchProgress: [Int: Double] = [:]
     private var activity: [String: String] = [:]
+    /// Frames on their way back to this Mac, by PC, while that PC already renders its next batch.
+    private var copying: [String: String] = [:]
     /// While this Mac joins the frames into the video: frames joined so far, and since when.
     private var joining: (done: Int, since: Date)?
     private var supervisor: Task<Void, Never>?
@@ -170,7 +172,10 @@ final class SplitRun {
                 j.eta = (now - state.submitted) / done * (Double(state.frameCount) - done)
                 j.eta_at = now
             }
-            let working = state.pcs.compactMap { pc in activity[pc.id].map { "\(pc.displayName): \($0)" } }
+            let working = state.pcs.compactMap { pc -> String? in
+                let doing = [activity[pc.id], copying[pc.id]].compactMap { $0 }
+                return doing.isEmpty ? nil : "\(pc.displayName): " + doing.joined(separator: ", ")
+            }
             j.note = (["\(state.framesDone) of \(state.frameCount) frames"] + working).joined(separator: " · ")
         }
         return j
@@ -213,6 +218,10 @@ final class SplitRun {
         let rpc = rpc(pc)
         var ready = false, failures = 0
         var strays = state.batches.filter { $0.pc == pc.id && $0.status != "done" }.compactMap(\.jobID)
+        // The PC starts its next batch while the last one's frames copy back; over Wi-Fi the copy
+        // can take as long as the render. One copy at a time per PC.
+        var copy: Task<Void, Never>?
+        defer { activity[pc.id] = nil }
         while running && !allDone {
             guard state.batches.contains(where: { $0.status == "pending" }) else {
                 try? await Task.sleep(for: .seconds(3))  // another PC might still hand one back
@@ -258,8 +267,11 @@ final class SplitRun {
                 }
                 guard running, let i = nextBatch(for: pc) else { continue }
                 do {
-                    try await render(i, on: rpc, pc: pc)
+                    let job = try await render(i, on: rpc, pc: pc)
                     failures = 0
+                    activity[pc.id] = nil
+                    await copy?.value
+                    if let job { copy = Task { await self.copyBack(i, job: job, on: rpc, pc: pc) } }
                 } catch is HandedBack {
                     batchProgress[i] = nil
                     release(i)
@@ -276,6 +288,7 @@ final class SplitRun {
                         note("\(pc.displayName) sits out the rest of this job")
                         activity[pc.id] = nil
                         changed()
+                        await copy?.value
                         return
                     }
                 } catch {
@@ -294,7 +307,27 @@ final class SplitRun {
                 }
             }
         }
-        activity[pc.id] = nil
+        await copy?.value
+    }
+
+    /// Copy a finished batch back; if that fails, its frames go back in line for any PC.
+    private func copyBack(_ i: Int, job: String, on rpc: RenderPC, pc: PCEntry) async {
+        let b = state.batches[i]
+        copying[pc.id] = "copying frames \(b.start)–\(b.end) to this Mac"
+        onChange()
+        defer { copying[pc.id] = nil; onChange() }
+        do {
+            try await collect(i, job: job, on: rpc)
+        } catch {
+            guard running else { return }
+            batchProgress[i] = nil
+            if error is BatchFailed { state.batches[i].attempts += 1 } else { try? await rpc.delete(job) }
+            release(i)
+            note("Copying frames \(b.start)-\(b.end) from \(pc.displayName) failed: \((error as? BatchFailed)?.reason ?? error.localizedDescription)")
+            if state.batches[i].attempts >= Self.attemptLimit {
+                fail("Frames \(b.start)–\(b.end) failed \(Self.attemptLimit) times")
+            }
+        }
     }
 
     /// The next frames for `pc`: cuts them off the first pending batch and leaves the rest in line.
@@ -331,7 +364,8 @@ final class SplitRun {
         changed()
     }
 
-    private func render(_ i: Int, on rpc: RenderPC, pc: PCEntry) async throws {
+    /// Renders batch `i` on the PC; returns the PC's job id once it's done, nil if the split was cancelled.
+    private func render(_ i: Int, on rpc: RenderPC, pc: PCEntry) async throws -> String? {
         let b = state.batches[i]
         state.batches[i].status = "running"
         state.batches[i].pc = pc.id
@@ -346,7 +380,7 @@ final class SplitRun {
         let job = try await rpc.submitBatch(options: opts)
         guard running else {  // cancelled while this was on its way, so cancel() didn't know its id
             try? await rpc.delete(job)
-            return
+            return nil
         }
         state.batches[i].jobID = job
         changed()
@@ -370,10 +404,9 @@ final class SplitRun {
                     var speeds = state.speeds ?? [:]
                     speeds[pc.id] = speeds[pc.id].map { ($0 + perFrame) / 2 } ?? perFrame
                     state.speeds = speeds
-                    activity[pc.id] = "sending frames \(b.start)–\(b.end) to this Mac"
-                    onChange()
-                    try await collect(i, job: job, on: rpc)
-                    return
+                    batchProgress[i] = 1
+                    changed()
+                    return job
                 case "failed":
                     let tail = (try? await rpc.log(job)).flatMap { $0.split(separator: "\n").last.map(String.init) }
                     try? await rpc.delete(job)
@@ -390,6 +423,7 @@ final class SplitRun {
             }
             try await Task.sleep(for: .seconds(2))
         }
+        return nil
     }
 
     /// Fetch a finished batch, count its frames and clear it off the PC.
@@ -398,6 +432,7 @@ final class SplitRun {
         let incoming = dir.appendingPathComponent("incoming-\(job)")
         defer { try? fm.removeItem(at: incoming) }
         _ = try await rpc.download(job, into: incoming)
+        guard running else { return }
         let files = try fm.contentsOfDirectory(atPath: incoming.path).filter { $0 != "log.txt" }
         let expected = state.frames(in: state.batches[i])
         guard files.count == expected else {
