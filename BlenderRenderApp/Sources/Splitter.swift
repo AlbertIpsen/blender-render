@@ -65,7 +65,9 @@ final class SplitRun {
     private static let silenceLimit = 120.0
     /// How long a batch should keep a PC busy: longer saves reloading the file, shorter shares more evenly.
     private static let batchSeconds = 300.0
-    private static let maxBatchFrames = 60
+    /// Only light scenes reach this; it keeps one batch's frames to a sensible copy back to the Mac.
+    /// At 0.2 s a frame, 60 was mostly opening the file and copying, not rendering.
+    private static let maxBatchFrames = 1000
     private static let busy = "busy with another job"
     private static let off = "switched off on the PC"
     /// Until a PC has been measured.
