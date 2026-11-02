@@ -6,9 +6,12 @@ JSON on stdout, except `send` which streams a tar of the job's output.
 
   rq version                 protocol version, worker state, GPU
   rq list                    all jobs, oldest first
-  rq receive <b64 options>   read a .blend from stdin into a new queued job, print its id
-  rq cancel <id>             stop a queued or rendering job
-  rq delete <id>             cancel if needed, then remove the job and its files
+  rq receive <b64 options>   read a .blend from stdin into a new job, print its id; it's held until
+                             `rq release` unless the options say "start_now": true
+  rq release <id>            let a held job render (the app's Start button)
+  rq cancel <id> [--by=who]  stop a held, queued or rendering job
+  rq delete <id> [--by=who]  cancel if needed, then remove the job and its files
+                             (both log to cancel.log, with `who` and the SSH client, to trace stray cancels)
   rq send <id>               tar of the job's out/ folder on stdout
   rq size <id>               about how many bytes `send` will stream (for the app's progress bar)
   rq log <id>                last 200 lines of the job's Blender log
@@ -55,7 +58,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 10
+VERSION = 11
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
@@ -236,9 +239,17 @@ def cmd_receive(b64):
     opts["submitted"] = time.time()
     opts["size"] = size
     write_json(d / "job.json", opts)
-    update_status(d, state="queued")
+    # Held unless the app's Start sent it: a job from a script or an older connector waits for Albert.
+    update_status(d, state="queued" if opts.get("start_now") else "held")
     started = ensure_worker()
     out({"id": job_id, "worker": started})
+
+
+def cmd_release(job_id):
+    d = job_dir(job_id)
+    if read_json(d / "status.json", {}).get("state") == "held":
+        update_status(d, state="queued")
+    out({"ok": True, "worker": ensure_worker()})
 
 
 def cache_path(key):
@@ -286,17 +297,32 @@ def cmd_batch(b64):
     out({"id": job_id, "worker": ensure_worker()})
 
 
-def cmd_cancel(job_id):
+def log_cancel(what, d, by):
+    """One line per cancel or delete in cancel.log, so a job that stops by surprise can be traced."""
+    st = read_json(d / "status.json", {})
+    name = read_json(d / "job.json", {}).get("name", "")
+    ssh = (os.environ.get("SSH_CLIENT") or "local").split(" ")[0]
+    with open(HERE / "cancel.log", "a", encoding="utf-8") as fh:
+        fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {what} {d.name} ({name}, {st.get('state')})  by={by or '?'}  from={ssh}\n")
+
+
+def by_arg(rest):
+    return next((a.split("=", 1)[1] for a in rest if a.startswith("--by=")), None)
+
+
+def cmd_cancel(job_id, by=None):
     d = job_dir(job_id)
+    log_cancel("cancel", d, by)
     (d / "cancel").touch()
     st = read_json(d / "status.json", {})
-    if st.get("state") == "queued":
+    if st.get("state") in ("queued", "held"):
         update_status(d, state="cancelled", ended=time.time())
     out({"ok": True})
 
 
-def cmd_delete(job_id):
+def cmd_delete(job_id, by=None):
     d = job_dir(job_id)
+    log_cancel("delete", d, by)
     (d / "cancel").touch()
     for _ in range(40):  # give the worker time to stop Blender and let go of the files
         if read_json(d / "status.json", {}).get("state") != "rendering":
@@ -597,10 +623,12 @@ def main():
         cmd_cache_drop(rest[0])
     elif cmd == "batch":
         cmd_batch(rest[0])
+    elif cmd == "release":
+        cmd_release(rest[0])
     elif cmd == "cancel":
-        cmd_cancel(rest[0])
+        cmd_cancel(rest[0], by_arg(rest))
     elif cmd == "delete":
-        cmd_delete(rest[0])
+        cmd_delete(rest[0], by_arg(rest))
     elif cmd == "send":
         cmd_send(rest[0])
     elif cmd == "size":

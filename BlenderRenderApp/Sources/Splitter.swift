@@ -21,13 +21,16 @@ struct SplitState: Codable {
     let samples: Int
     let fast: Bool
     let video: Bool
-    let pcs: [PCEntry]
+    /// Can change until the first batch starts (Up Next).
+    var pcs: [PCEntry]
     let submitted: Double
     var state = "rendering"  // rendering, done, failed, cancelled
     var ended: Double?
     var error: String?
     var batches: [SplitBatch]
     var output: String?
+    /// The file's Blender version, so PCs added while it waits can be checked.
+    var blender: String?
     var files: Int?
     var log: [String] = []
     /// Measured seconds per frame, by PC id; each PC's next batch is cut to fit.
@@ -58,8 +61,8 @@ final class SplitRun {
     private var joining: (done: Int, since: Date)?
     private var supervisor: Task<Void, Never>?
     /// PCs that failed too often and sit out the rest of this job.
-    /// Whether a job ahead of this one in the queue still has frames for this PC.
-    var workAhead: () -> Bool = { false }
+    /// Whether a job ahead of this one in the queue uses this PC and still has frames to render.
+    var workAhead: (PCEntry) -> Bool = { _ in false }
     /// Batches in a row that a PC has to fail before it sits out the rest of the job.
     private static let pcFailureLimit = 2
     private static let attemptLimit = 3
@@ -95,26 +98,50 @@ final class SplitRun {
         resume()
     }
 
-    func resume() {
+    /// `after`: workers being replaced (new PCs chosen), which have to let go of their PCs first.
+    func resume(after old: Task<Void, Never>? = nil) {
         for i in state.batches.indices where state.batches[i].status == "running" {
             state.batches[i].status = "pending"  // the app quit mid-batch; workers clear what's left on the PCs
         }
         supervisor = Task {
+            await old?.value
             await withTaskGroup(of: Void.self) { group in
                 for pc in state.pcs { group.addTask { await self.worker(pc) } }
             }
+            if Task.isCancelled { return }  // replaced by other PCs, not finished
             await finish()
         }
     }
 
-    func cancel() {
+    /// Not a frame rendered yet, so the PCs can still change.
+    var notStarted: Bool {
+        running && state.framesDone == 0 && !state.batches.contains { $0.status != "pending" }
+    }
+
+    /// Choose other PCs for a job that hasn't started.
+    func setPCs(_ pcs: [PCEntry]) {
+        guard notStarted, !pcs.isEmpty, pcs.map(\.id) != state.pcs.map(\.id) else { return }
+        let dropped = state.pcs.filter { pc in !pcs.contains { $0.id == pc.id } }
+        state.pcs = pcs
+        note("PCs: " + pcs.map(\.displayName).joined(separator: ", "))
+        let old = supervisor
+        old?.cancel()
+        activity = [:]
+        for pc in dropped { let rpc = rpc(pc), id = state.id; Task { await old?.value; try? await rpc.cacheDrop(id) } }
+        changed()
+        resume(after: old)
+    }
+
+    /// `source` says what asked for it (button, connector…), for the log: cancelled jobs lose their frames.
+    func cancel(source: String) {
         guard state.state == "rendering" else { return }
         state.state = "cancelled"
         state.ended = Date().timeIntervalSince1970
-        note("Cancelled")
+        note("Cancelled by \(source)")
+        CancelLog.write("cancel split-\(state.id) (\(state.name), \(state.framesDone) of \(state.frameCount) frames done) by \(source)")
         for pc in state.pcs { let rpc = rpc(pc), jobs = state.batches.filter { $0.pc == pc.id && $0.status == "running" }.compactMap(\.jobID), id = state.id
             Task {
-                for job in jobs { try? await rpc.delete(job) }
+                for job in jobs { try? await rpc.delete(job, by: "split-cancel") }
                 try? await rpc.cacheDrop(id)
             }
         }
@@ -128,8 +155,8 @@ final class SplitRun {
         for pc in state.pcs { let rpc = rpc(pc); Task { try? await rpc.nudgeAwake() } }
     }
 
-    func remove() {
-        cancel()
+    func remove(source: String) {
+        cancel(source: source)
         try? FileManager.default.removeItem(at: dir)
     }
 
@@ -222,12 +249,12 @@ final class SplitRun {
         // can take as long as the render. One copy at a time per PC.
         var copy: Task<Void, Never>?
         defer { activity[pc.id] = nil }
-        while running && !allDone {
+        while running && !allDone && !Task.isCancelled {
             guard state.batches.contains(where: { $0.status == "pending" }) else {
                 try? await Task.sleep(for: .seconds(3))  // another PC might still hand one back
                 continue
             }
-            guard !workAhead() else {  // one job at a time, in queue order; this one doesn't even need the file yet
+            guard !workAhead(pc) else {  // a PC does one job at a time, in queue order; this one doesn't even need the file yet
                 activity[pc.id] = nil
                 onChange()
                 try? await Task.sleep(for: .seconds(3))
@@ -536,8 +563,10 @@ final class SplitManager {
 
     private func make(_ state: SplitState, cfg: Config) -> SplitRun {
         let run = SplitRun(state: state, cfg: cfg, onChange: onChange)
-        run.workAhead = { [weak self, unowned run] in
-            self?.runs.contains { $0 !== run && $0.state.submitted < run.state.submitted && $0.holdsPCs } ?? false
+        run.workAhead = { [weak self, unowned run] pc in
+            self?.runs.contains {
+                $0 !== run && $0.state.submitted < run.state.submitted && $0.holdsPCs && $0.state.pcs.contains { $0.id == pc.id }
+            } ?? false
         }
         return run
     }
@@ -555,12 +584,13 @@ final class SplitManager {
     }
 
     /// Returns the new job's id.
-    @discardableResult func start(_ s: JobSetup, pcs: [PCEntry], cfg: Config) throws -> String {
+    /// `id`: keep a held job's id, so "held-<id>" becomes "split-<id>".
+    @discardableResult func start(_ s: JobSetup, pcs: [PCEntry], cfg: Config, id: String? = nil) throws -> String {
         let step = s.step ?? (s.fast ? JobSetup.fastStep : 1)
-        let state = SplitState(id: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+        let state = SplitState(id: id ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
                                name: s.name, start: s.start, end: s.end, step: step, pct: s.pct, samples: s.samples,
                                fast: s.fast, video: s.info.video, pcs: pcs, submitted: Date().timeIntervalSince1970,
-                               batches: [SplitBatch(start: s.start, end: s.end)])
+                               batches: [SplitBatch(start: s.start, end: s.end)], blender: s.info.blender)
         let run = make(state, cfg: cfg)
         runs.append(run)
         try run.begin(packed: s.packed)
@@ -568,9 +598,27 @@ final class SplitManager {
         return run.job.id
     }
 
-    func remove(_ run: SplitRun) {
-        run.remove()
+    func remove(_ run: SplitRun, source: String) {
+        run.remove(source: source)
         runs.removeAll { $0 === run }
         onChange()
+    }
+}
+
+/// Every cancel and remove, with what asked for it, in the app's support folder (cancel.log).
+enum CancelLog {
+    static let url = Config.fileURL.deletingLastPathComponent().appendingPathComponent("cancel.log")
+
+    static func write(_ line: String) {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let data = Data((f.string(from: Date()) + "  app: " + line + "\n").utf8)
+        if let fh = try? FileHandle(forWritingTo: url) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            try? fh.close()
+        } else {
+            try? data.write(to: url)
+        }
     }
 }

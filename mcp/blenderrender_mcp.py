@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """BlenderRender connector for Claude: an MCP server (stdio) that queues .blend files on the render PC.
 
-Jobs go straight into the PC's render queue (remote/pc/rq.py), so they show up in the BlenderRender
-Mac app like ones dropped there: the app shows progress and time left and posts the "Render done"
-notification. With several PCs set up, animations go to the Mac app instead, which shares them out
-(a folder in its inbox per request; job ids starting "split-"). Uses the app's own settings (~/Library/Application Support/BlenderRender/config.json),
+Jobs go to the BlenderRender Mac app (a folder in its inbox per request), where they wait in "Waiting to
+Start" (job ids starting "held-") until Albert picks the PCs and presses Start; then they become a
+split job ("split-", the same id) or a job on one PC. Without the app, a job goes straight into the
+main PC's queue (remote/pc/rq.py) and is held there until Start in the app. Uses the app's own settings (~/Library/Application Support/BlenderRender/config.json),
 packs textures with the Mac's Blender exactly like the app, and downloads into the app's folder.
 
 Standard library only (macOS's Python 3.9). Register with Claude Code:
@@ -33,6 +33,7 @@ PACK_SCRIPT = next((p for p in (APP / "Contents/Resources/pack_inspect.py",
 APP_DEFAULTS = "com.geysier.blenderrender"
 INBOX = CONFIG.parent / "inbox"
 SPLITS = CONFIG.parent / "splits"
+HELD = CONFIG.parent / "held"
 
 
 class ToolError(Exception):
@@ -128,6 +129,10 @@ def describe(job, position=None):
             out["time_left"] = "estimating (animations: after the first frame)"
     elif state == "queued" and position:
         out["queue_position"] = position
+    elif state == "held":
+        out["note"] = "Waiting for Albert to choose its PCs and press Start in BlenderRender."
+        if job.get("pcs"):
+            out["pcs_ticked"] = job["pcs"]
     elif state in ("done", "failed", "cancelled"):
         out["files"] = job.get("files", 0)
         if job.get("started") and job.get("ended"):
@@ -160,6 +165,50 @@ def split_jobs():
             job["eta_at"] = time.time()
         jobs.append(job)
     return sorted(jobs, key=lambda j: j["started"])
+
+
+def held_jobs():
+    """Jobs waiting in the app for Start (HeldJob in Held.swift)."""
+    names = {p.get("id"): p.get("name") or p.get("host") for p in config_pcs()}
+    jobs = []
+    for file in HELD.glob("*/job.json"):
+        try:
+            h = json.loads(file.read_text())
+        except (OSError, ValueError):
+            continue
+        jobs.append({"id": "held-" + h["id"], "name": h["name"], "state": "held",
+                     "mode": "animation" if h["isAnimation"] else "still", "start": h["start"], "end": h["end"],
+                     "frame": h["frame"], "step": h.get("step") or 1, "pct": h["pct"], "samples": h["samples"],
+                     "started": h["submitted"], "pcs": [names.get(p, p) for p in h.get("pcs", [])]})
+    return sorted(jobs, key=lambda j: j["started"])
+
+
+def config_pcs():
+    try:
+        cfg = json.loads(CONFIG.read_text())
+    except (OSError, ValueError):
+        return []
+    return [{"id": "main", "name": "render PC", "host": cfg.get("host")}] + (cfg.get("extraPCs") or []) + [{"id": "mac", "name": "This Mac"}]
+
+
+def find_held(cfg, job_id):
+    """A held job, or what it became once started."""
+    for j in held_jobs():
+        if j["id"] == job_id:
+            return j
+    try:
+        started = json.loads((HELD / "started.json").read_text()).get(job_id[len("held-"):])
+    except (OSError, ValueError):
+        started = None
+    if not started:
+        raise ToolError("No job %s waiting in the BlenderRender app." % job_id)
+    if started["job"].startswith("split-"):
+        return find_split(started["job"])
+    if started.get("pc") in ("", "main"):
+        return find_job(cfg, started["job"])
+    names = {p.get("id"): p.get("name") or p.get("host") for p in config_pcs()}
+    return {"id": started["job"], "state": "started", "name": job_id,
+            "note": "Started on %s as job %s; follow it in the BlenderRender app." % (names.get(started["pc"], started["pc"]), started["job"])}
 
 
 def find_split(job_id):
@@ -245,7 +294,9 @@ def tool_status(cfg, _args):
     jobs = [j for j in lst["jobs"] if not j.get("parent")]  # batches of a split job belong to the Mac app
     jobs += split_jobs()
     queued = [j for j in jobs if j.get("state") == "queued"]
+    waiting = held_jobs() + [j for j in jobs if j.get("state") == "held"]
     return {
+        "waiting_to_start": [describe(j) for j in waiting],
         "render_pc": v.get("host"), "gpu": pretty_gpu(v.get("gpu") or ""), "queue_worker_running": lst.get("worker"),
         "rendering": [describe(j) for j in jobs if j.get("state") == "rendering"],
         "up_next": [describe(j, i + 1) for i, j in enumerate(queued)],
@@ -291,14 +342,16 @@ def tool_queue(cfg, args):
                 opts["fast"] = True
         else:
             opts["frame"] = int(args.get("frame", info["frame_current"]))
-        split = None
-        if mode == "animation" and any(p.get("enabled", True) for p in cfg.get("extraPCs") or []):
-            split = ask_app({"action": "split", "name": opts["name"], "start": opts["start"], "end": opts["end"],
-                             "step": opts["step"], "pct": opts["pct"], "samples": opts["samples"], "fast": fast,
-                             "info": info}, blend=packed)
-        if split and split.get("split"):
-            reply = {"id": split["job_id"]}
+        request = {"action": "hold", "name": opts["name"], "mode": mode, "pct": opts["pct"], "samples": opts["samples"],
+                   "fast": fast, "info": info}
+        if mode == "animation":
+            request.update(start=opts["start"], end=opts["end"], step=opts["step"])
         else:
+            request["frame"] = opts["frame"]
+        split = ask_app(request, blend=packed)  # waits in the app for Albert's Start
+        if split and split.get("held"):
+            reply = {"id": split["job_id"]}
+        else:  # no app: straight to the main PC, where it's held until Start in the app
             b64 = base64.urlsafe_b64encode(json.dumps(opts).encode()).decode().rstrip("=")
             with open(packed, "rb") as fh:
                 reply = rq_json(cfg, "receive", b64, stdin=fh, timeout=1800)
@@ -314,16 +367,18 @@ def tool_queue(cfg, args):
               "engine": info["engine"], "camera": info["camera"],
               "output": ("video (the file's own format)" if mode == "animation" and info["video"]
                          else "PNG image sequence" if mode == "animation" else "PNG"),
-              "note": "It's in BlenderRender's queue now; the app notifies when it's done."}
-    if split and split.get("split"):
-        result["split_across"] = split["pcs"]
-        result["note"] = "Sharing it across these PCs. The Mac app runs the job, so it must stay open, and the result lands in the downloads folder by itself."
+              "note": "It's in BlenderRender's Waiting to Start list. It renders once Albert chooses the PCs and "
+                      "presses Start there; the app notifies when it's done."}
+    if split and split.get("held"):
+        result["pcs_ticked"] = split.get("pcs", [])
     if info.get("missing"):
         result["warning"] = "Textures missing on this Mac, so not packed: " + ", ".join(info["missing"])
     return result
 
 
 def find_job(cfg, job_id):
+    if job_id.startswith("held-"):
+        return find_held(cfg, job_id)
     if job_id.startswith("split-"):
         return find_split(job_id)
     for j in rq_json(cfg, "list")["jobs"]:
@@ -333,6 +388,9 @@ def find_job(cfg, job_id):
 
 
 def tool_job(cfg, args):
+    if args["job_id"].startswith("held-"):
+        j = find_held(cfg, args["job_id"])
+        return describe(j) if j.get("state") != "started" else j
     if args["job_id"].startswith("split-"):
         return describe(find_split(args["job_id"]))
     jobs = [j for j in rq_json(cfg, "list")["jobs"] if not j.get("parent")]
@@ -408,7 +466,10 @@ def download_split(job, args):
 
 
 def app_action(action, job_id):
-    find_split(job_id)
+    if job_id.startswith("held-"):
+        find_held(None, job_id)
+    else:
+        find_split(job_id)
     reply = ask_app({"action": action, "job": job_id})
     if reply is None:
         raise ToolError("The BlenderRender app didn't answer. Is it open?")
@@ -417,20 +478,26 @@ def app_action(action, job_id):
 
 
 def tool_cancel(cfg, args):
+    if args["job_id"].startswith("held-") and any(j["id"] == args["job_id"] for j in held_jobs()):
+        app_action("cancel", args["job_id"])
+        return {"cancelled": args["job_id"], "note": "It was still waiting for Start, so it's gone from the queue."}
     if args["job_id"].startswith("split-"):
         app_action("cancel", args["job_id"])
         return {"cancelled": args["job_id"], "note": "The render stops on every PC and its frames are deleted."}
     find_job(cfg, args["job_id"])
-    rq_json(cfg, "cancel", args["job_id"])
+    rq_json(cfg, "cancel", args["job_id"], "--by=claude-connector")
     return {"cancelled": args["job_id"], "note": "Anything already rendered stays downloadable."}
 
 
 def tool_remove(cfg, args):
+    if args["job_id"].startswith("held-") and any(j["id"] == args["job_id"] for j in held_jobs()):
+        app_action("remove", args["job_id"])
+        return {"removed": args["job_id"]}
     if args["job_id"].startswith("split-"):
         app_action("remove", args["job_id"])
         return {"removed": args["job_id"], "note": "Downloads on this Mac are kept."}
     find_job(cfg, args["job_id"])
-    rq_json(cfg, "delete", args["job_id"], timeout=60)
+    rq_json(cfg, "delete", args["job_id"], "--by=claude-connector", timeout=60)
     return {"removed": args["job_id"], "note": "Its files on the render PC are deleted; downloads on this Mac are kept."}
 
 

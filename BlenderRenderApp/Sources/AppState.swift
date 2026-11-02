@@ -25,10 +25,8 @@ struct JobSetup: Identifiable {
     var samples: Int
     /// Fast preview (animations): every `fastStep`-th frame, persistent data; the video keeps its length.
     var fast = false
-    /// Share the frames between all PCs that can take part.
-    var split = true
-    /// Otherwise the whole job goes to this PC (PCEntry id).
-    var pc = "main"
+    /// PCEntry ids: one gets the whole job; two or more share an animation's frames.
+    var pcs: [String] = []
     /// Render every Nth frame, when something other than `fast` chose it (the Claude connector).
     var step: Int?
 
@@ -62,6 +60,9 @@ final class AppState: ObservableObject {
     @Published var pcLive: [String: PCLive] = [:]
     private var lastPCLook = Date.distantPast
 
+    /// Jobs waiting on this Mac for Start; those being started are hidden while they upload.
+    private var held: [HeldJob] = HeldJob.loadAll()
+    private var starting: Set<String> = []
     private var connected = false
     /// Last list from each PC, by PCEntry id; an unreachable PC keeps what it last reported.
     private var jobsByPC: [String: [PCJob]] = [:]
@@ -75,6 +76,8 @@ final class AppState: ObservableObject {
 
     var pc: RenderPC { RenderPC(cfg: cfg) }
     var rendering: [PCJob] { jobs.filter { $0.state == "rendering" } }
+    /// Added, waiting for PCs to be chosen and Start: held on this Mac, or held on a PC (sent there directly).
+    var waitingToStart: [PCJob] { jobs.filter { $0.state == "held" } }
     var upNext: [PCJob] { jobs.filter { $0.state == "queued" } }
     /// Changes whenever rows move between sections, so the list can animate it.
     var layoutKey: [String] { uploads.map(\.id.uuidString) + jobs.map { $0.id + ($0.state ?? "") } }
@@ -89,11 +92,12 @@ final class AppState: ObservableObject {
             parts.append("\(rendering.count) rendering" + left)
         }
         if !upNext.isEmpty { parts.append("\(upNext.count) waiting") }
+        if !waitingToStart.isEmpty { parts.append("\(waitingToStart.count) to start") }
         let ready = finished.filter { $0.state == "done" && downloaded[$0.id] == nil }.count
         if ready > 0 { parts.append("\(ready) ready to download") }
         return parts.isEmpty ? (cfg.isConfigured ? "Queue is empty" : "Not connected") : parts.joined(separator: " · ")
     }
-    var finished: [PCJob] { jobs.filter { !$0.isActive }.sorted { ($0.ended ?? $0.submitted ?? 0) > ($1.ended ?? $1.submitted ?? 0) } }
+    var finished: [PCJob] { jobs.filter { !$0.isActive && $0.state != "held" }.sorted { ($0.ended ?? $0.submitted ?? 0) > ($1.ended ?? $1.submitted ?? 0) } }
 
     init() {
         Notifier.shared.setUp()
@@ -243,13 +247,36 @@ final class AppState: ObservableObject {
         splits.runs.last { $0.state.state == "rendering" }?.state.speeds?[id]
     }
 
-    /// PCs that can share an animation made in `blender`: switched on, online and on the same version.
+    /// The PCs ticked for split jobs in Settings that can share an animation made in `blender`.
     func splitPCs(blender: String) -> [PCEntry] {
-        let wanted = Self.majorMinor(blender)
-        return cfg.allPCs.filter { pc in
-            guard pc.enabled, let v = pcVersions[pc.id], v.off != true else { return false }
-            return Self.majorMinor(v.blender_version ?? "") == wanted
-        }
+        cfg.allPCs.filter { $0.enabled && canShare($0, blender: blender) }
+    }
+
+    /// Online, switched on, and on the same Blender major.minor as the file.
+    func canShare(_ pc: PCEntry, blender: String) -> Bool {
+        guard let v = pcVersions[pc.id], v.off != true else { return false }
+        return Self.majorMinor(v.blender_version ?? "") == Self.majorMinor(blender)
+    }
+
+    /// Ticked when a job is added: the split PCs for an animation, else the main PC.
+    func defaultPCs(blender: String, animation: Bool) -> [String] {
+        let split = splitPCs(blender: blender)
+        if animation && split.count >= 2 { return split.map(\.id) }
+        return [singlePCs().first?.id ?? "main"]
+    }
+
+    // MARK: PCs of a split job that hasn't started
+
+    func canChangePCs(_ job: PCJob) -> Bool { splits.run(job.id)?.notStarted ?? false }
+    func splitPCIDs(_ job: PCJob) -> [String] { splits.run(job.id)?.state.pcs.map(\.id) ?? [] }
+    func splitBlender(_ job: PCJob) -> String { splits.run(job.id)?.state.blender ?? "" }
+
+    func setSplitPC(_ job: PCJob, _ pc: PCEntry, on: Bool) {
+        guard let run = splits.run(job.id) else { return }
+        var ids = run.state.pcs.map(\.id).filter { $0 != pc.id }
+        if on { ids.append(pc.id) }
+        run.setPCs(cfg.allPCs.filter { ids.contains($0.id) })
+        refreshJobs()
     }
 
     private static func majorMinor(_ version: String) -> String {
@@ -291,7 +318,7 @@ final class AppState: ObservableObject {
     }
 
     private func refreshJobs() {
-        let new = pcJobs + splits.jobs
+        let new = held.filter { !starting.contains($0.id) }.map(\.job) + pcJobs + splits.jobs
         notifyChanges(old: jobs, new: new)
         jobs = new
         updateKeepAwake()
@@ -437,7 +464,8 @@ final class AppState: ObservableObject {
                                            name: url.deletingPathExtension().lastPathComponent,
                                            isAnimation: anim, frame: info.frame_current,
                                            start: info.frame_start, end: info.frame_end,
-                                           pct: info.pct, samples: info.samples))
+                                           pct: info.pct, samples: info.samples,
+                                           pcs: defaultPCs(blender: info.blender, animation: anim)))
                 } catch {
                     update(up.id) { $0.phase = .failed(error.localizedDescription) }
                 }
@@ -445,36 +473,98 @@ final class AppState: ObservableObject {
         }
     }
 
-    func send(_ s: JobSetup) {
+    /// "Add to Queue": the job waits for Start, with the PCs from the sheet ticked.
+    func hold(_ s: JobSetup, source: String = "app") {
         setups.removeAll { $0.id == s.id }
-        let pcs = splitPCs(blender: s.info.blender)
-        if s.isAnimation && s.split && pcs.count >= 2 {
-            uploads.removeAll { $0.id == s.id }
-            do { try splits.start(s, pcs: pcs, cfg: cfg) } catch { alert = error.localizedDescription }
+        uploads.removeAll { $0.id == s.id }
+        do {
+            held.append(try HeldJob.create(s, source: source))
+            try? FileManager.default.removeItem(at: s.packed.deletingLastPathComponent())
+        } catch {
+            alert = "Couldn't add \(s.name): \(error.localizedDescription)"
+        }
+        refreshJobs()
+    }
+
+    // MARK: waiting to start
+
+    private func heldJob(_ job: PCJob) -> HeldJob? {
+        guard job.held == true else { return nil }
+        return held.first { "held-" + $0.id == job.id }
+    }
+
+    /// The PCs ticked for a job that waits for Start.
+    func heldPCIDs(_ job: PCJob) -> [String] { heldJob(job)?.pcs ?? [] }
+    func heldBlender(_ job: PCJob) -> String { heldJob(job)?.info.blender ?? "" }
+
+    func setHeldPC(_ job: PCJob, _ pc: PCEntry, on: Bool) {
+        guard let i = held.firstIndex(where: { "held-" + $0.id == job.id }) else { return }
+        if !held[i].isAnimation { held[i].pcs = [pc.id] } else {
+            held[i].pcs.removeAll { $0 == pc.id }
+            if on { held[i].pcs.append(pc.id) }
+        }
+        try? held[i].save()
+        refreshJobs()
+    }
+
+    /// Start: a held job goes to its PCs; one held on a PC is let go there.
+    func start(_ job: PCJob) {
+        if let h = heldJob(job) { return launch(h) }
+        guard job.state == "held" else { return }
+        let pc = rpc(for: job)
+        Task {
+            do { try await pc.release(job.id) } catch { alert = error.localizedDescription }
+            refreshSoon()
+        }
+    }
+
+    private func launch(_ h: HeldJob) {
+        var s = h.setup
+        if s.pcs.isEmpty { s.pcs = defaultPCs(blender: h.info.blender, animation: h.isAnimation) }
+        let chosen = cfg.allPCs.filter { s.pcs.contains($0.id) }
+        let sharing = chosen.filter { canShare($0, blender: s.info.blender) }
+        if s.isAnimation && sharing.count >= 2 {
+            do {
+                let id = try splits.start(s, pcs: sharing, cfg: cfg, id: h.id)
+                h.started(as: id, on: nil)
+                held.removeAll { $0.id == h.id }
+            } catch { alert = error.localizedDescription }
+            refreshJobs()
             return
         }
-        let size = (try? FileManager.default.attributesOfItem(atPath: s.packed.path)[.size] as? NSNumber)?.int64Value
-        update(s.id) { $0.phase = .uploading; $0.transfer = Transfer(total: size) }
+        guard let target = sharing.first ?? chosen.first ?? cfg.allPCs.first else { return }
+        starting.insert(h.id)
+        var up = Upload(file: URL(fileURLWithPath: h.name + ".blend"))
+        let size = (try? FileManager.default.attributesOfItem(atPath: h.blend.path)[.size] as? NSNumber)?.int64Value
+        up.phase = .uploading
+        up.transfer = Transfer(total: size)
+        uploads.append(up)
+        refreshJobs()
         var opts: [String: Any] = ["name": s.name, "mode": s.isAnimation ? "animation" : "still",
-                                   "pct": s.pct, "samples": s.samples, "source": s.packed.lastPathComponent]
+                                   "pct": s.pct, "samples": s.samples, "source": h.blend.lastPathComponent]
         if !cfg.keepAwake { opts["keep_awake"] = false }
         if s.isAnimation {
             opts["start"] = s.start; opts["end"] = s.end
-            if s.fast { opts["step"] = JobSetup.fastStep; opts["fast"] = true }
+            let step = s.step ?? (s.fast ? JobSetup.fastStep : 1)
+            if step > 1 { opts["step"] = step }
+            if s.fast { opts["fast"] = true }
         } else { opts["frame"] = s.frame }
-        let target = singlePCs().first { $0.id == s.pc } ?? cfg.allPCs.first { $0.id == "main" }
-        let pc = target.map { RenderPC(cfg: cfg.config(for: $0)) } ?? self.pc, id = s.id
+        opts["start_now"] = true
+        let pc = RenderPC(cfg: cfg.config(for: target)), id = up.id
         Task {
             do {
-                _ = try await pc.submit(blend: s.packed, options: opts, progress: ByteMeter { n in
+                let job = try await pc.submit(blend: h.blend, options: opts, progress: ByteMeter { n in
                     Task { @MainActor in self.update(id) { $0.transfer.update(n) } }
                 }.callAsFunction)
-                try? FileManager.default.removeItem(at: s.packed.deletingLastPathComponent())
+                h.started(as: job, on: target.id)
+                held.removeAll { $0.id == h.id }
                 uploads.removeAll { $0.id == id }
                 refreshSoon()
             } catch {
                 update(id) { $0.phase = .failed(error.localizedDescription) }
             }
+            starting.remove(h.id)
+            refreshJobs()
         }
     }
 
@@ -482,6 +572,13 @@ final class AppState: ObservableObject {
         setups.removeAll { $0.id == s.id }
         uploads.removeAll { $0.id == s.id }
         try? FileManager.default.removeItem(at: s.packed.deletingLastPathComponent())
+    }
+
+    private func discardHeld(_ h: HeldJob, source: String) {
+        CancelLog.write("remove held-\(h.id) (\(h.name), waiting to start) by \(source)")
+        h.discard()
+        held.removeAll { $0.id == h.id }
+        refreshJobs()
     }
 
     // MARK: requests from the Claude connector
@@ -497,6 +594,8 @@ final class AppState: ObservableObject {
         var samples: Int?
         var fast: Bool?
         var info: BlendInfo?
+        var mode: String?
+        var frame: Int?
     }
 
     private var inbox: URL { Config.fileURL.deletingLastPathComponent().appendingPathComponent("inbox") }
@@ -520,21 +619,26 @@ final class AppState: ObservableObject {
 
     private func handle(_ r: InboxRequest, in dir: URL) -> [String: Any] {
         switch r.action {
-        case "split":
-            guard let info = r.info, let start = r.start, let end = r.end else { return ["split": false] }
-            let pcs = splitPCs(blender: info.blender)
-            guard pcs.count >= 2 else { return ["split": false] }
+        case "hold", "split":  // "split": connectors from before held jobs; it waits for Start all the same
+            guard let info = r.info else { return ["held": false, "split": false] }
+            let animation = r.action == "split" || r.mode == "animation"
             let s = JobSetup(id: UUID(), packed: dir.appendingPathComponent("input.blend"), info: info,
-                             name: r.name ?? "Render", isAnimation: true, frame: info.frame_current, start: start, end: end,
-                             pct: r.pct ?? info.pct, samples: r.samples ?? info.samples, fast: r.fast ?? false, step: r.step)
+                             name: r.name ?? "Render", isAnimation: animation, frame: r.frame ?? info.frame_current,
+                             start: r.start ?? info.frame_start, end: r.end ?? info.frame_end,
+                             pct: r.pct ?? info.pct, samples: r.samples ?? info.samples, fast: r.fast ?? false,
+                             pcs: defaultPCs(blender: info.blender, animation: animation), step: r.step)
             do {
-                return ["split": true, "job_id": try splits.start(s, pcs: pcs, cfg: cfg), "pcs": pcs.map(\.displayName)]
+                let h = try HeldJob.create(s, source: "Claude")
+                held.append(h)
+                refreshJobs()
+                let names = cfg.allPCs.filter { h.pcs.contains($0.id) }.map(pcName)
+                return ["held": true, "split": true, "job_id": "held-" + h.id, "pcs": names]
             } catch {
-                return ["split": false, "error": error.localizedDescription]
+                return ["held": false, "split": false, "error": error.localizedDescription]
             }
         case "cancel", "remove":
             guard let job = jobs.first(where: { $0.id == r.job }) else { return ["error": "No job \(r.job ?? "")."] }
-            if r.action == "cancel" { cancel(job) } else { remove(job) }
+            if r.action == "cancel" { cancel(job, source: "Claude connector") } else { remove(job, source: "Claude connector") }
             return ["ok": true]
         default:
             return ["error": "Unknown request \(r.action)."]
@@ -561,20 +665,25 @@ final class AppState: ObservableObject {
 
     // MARK: job actions
 
-    func cancel(_ job: PCJob) {
-        if let run = splits.run(job.id) { return run.cancel() }
+    /// `source`: what asked (the Cancel button, the Claude connector…), written to cancel.log.
+    func cancel(_ job: PCJob, source: String = "Cancel button") {
+        if let h = heldJob(job) { return discardHeld(h, source: source) }
+        if let run = splits.run(job.id) { return run.cancel(source: source) }
+        CancelLog.write("cancel \(job.id) (\(job.displayName), \(job.state ?? "")) on \(job.pc ?? "main") by \(source)")
         let pc = rpc(for: job)
         Task {
-            do { try await pc.cancel(job.id) } catch { alert = error.localizedDescription }
+            do { try await pc.cancel(job.id, by: source.replacingOccurrences(of: " ", with: "-")) } catch { alert = error.localizedDescription }
             refreshSoon()
         }
     }
 
-    func remove(_ job: PCJob) {
-        if let run = splits.run(job.id) { return splits.remove(run) }
+    func remove(_ job: PCJob, source: String = "Remove button") {
+        if let h = heldJob(job) { return discardHeld(h, source: source) }
+        if let run = splits.run(job.id) { return splits.remove(run, source: source) }
+        CancelLog.write("remove \(job.id) (\(job.displayName), \(job.state ?? "")) on \(job.pc ?? "main") by \(source)")
         let pc = rpc(for: job)
         Task {
-            do { try await pc.delete(job.id) } catch { alert = error.localizedDescription }
+            do { try await pc.delete(job.id, by: source.replacingOccurrences(of: " ", with: "-")) } catch { alert = error.localizedDescription }
             refreshSoon()
         }
     }

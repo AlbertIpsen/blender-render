@@ -238,6 +238,9 @@ struct JobList: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                if !state.waitingToStart.isEmpty {
+                    group("Waiting to Start", uploads: [], jobs: state.waitingToStart, numbered: false)
+                }
                 if !state.uploads.isEmpty || !state.rendering.isEmpty {
                     group("Now Rendering", uploads: state.uploads, jobs: state.rendering, numbered: false)
                 }
@@ -277,7 +280,7 @@ struct JobList: View {
 
 /// Leading status glyph shared by uploads and jobs; same size everywhere so rows align.
 struct StatusGlyph: View {
-    enum Kind { case progress(Double), busy, queued(Int), done, failed, cancelled }
+    enum Kind { case progress(Double), busy, queued(Int), held, done, failed, cancelled }
     let kind: Kind
 
     var body: some View {
@@ -293,6 +296,8 @@ struct StatusGlyph: View {
                 ProgressView().controlSize(.small)
             case .queued(let n):
                 Image(systemName: n <= 50 ? "\(n).circle" : "clock").font(.system(size: 20)).foregroundStyle(.secondary)
+            case .held:
+                Image(systemName: "pause.circle").font(.system(size: 20)).foregroundStyle(Color.accentColor)
             case .done:
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 20)).foregroundStyle(.green)
             case .failed:
@@ -402,31 +407,70 @@ struct JobRow: View {
             }
             Spacer(minLength: 12)
             secondaryActions.opacity(hovering.value ? 1 : 0)
+            if job.held == true || (job.split == true && state.canChangePCs(job)) { pcsMenu }
             primaryAction
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering.value = h } }
         .contextMenu {
+            if job.state == "held" { Button("Start") { state.start(job) } }
             if job.isActive { Button("Cancel Render") { state.cancel(job) } }
             if (job.files ?? 0) > 0 { Button("Download") { state.download(job) } }
             if state.downloaded[job.id] != nil { Button("Show in Finder") { state.reveal(job) } }
             Button("Show Blender Log") { logJob = job }
             Divider()
-            Button(job.split == true ? "Remove…" : "Remove from Render PC…", role: .destructive) { confirmRemove.value = true }
+            Button(onThisMac ? "Remove…" : "Remove from Render PC…", role: .destructive) { confirmRemove.value = true }
         }
-        .confirmationDialog(job.split == true ? "Remove “\(job.displayName)”?" : "Remove “\(job.displayName)” from the render PC?",
+        .confirmationDialog(onThisMac ? "Remove “\(job.displayName)”?" : "Remove “\(job.displayName)” from the render PC?",
                             isPresented: $confirmRemove.value) {
             Button("Remove", role: .destructive) { state.remove(job) }
         } message: {
-            Text(job.split == true ? (job.isActive ? "The render stops on every PC and its frames are deleted." : "Downloads on this Mac are kept.")
+            Text(job.held == true ? "It hasn't started, so nothing is lost but the copy waiting here."
+                 : job.split == true ? (job.isActive ? "The render stops on every PC and its frames are deleted." : "Downloads on this Mac are kept.")
                  : job.isActive ? "The render stops and its files on the PC are deleted."
                               : "Its files on the PC are deleted. Downloads on this Mac are kept.")
         }
     }
 
+    /// Which PCs render the job: while it waits for Start, or a split job until its first batch.
+    private var pcsMenu: some View {
+        let isHeld = job.held == true
+        let ids = isHeld ? state.heldPCIDs(job) : state.splitPCIDs(job)
+        let blender = isHeld ? state.heldBlender(job) : state.splitBlender(job)
+        let offered = isHeld ? state.singlePCs() + state.cfg.allPCs.filter { ids.contains($0.id) && !state.singlePCs().contains($0) }
+                             : state.cfg.allPCs.filter { ids.contains($0.id) || state.canShare($0, blender: blender) }
+        return Menu {
+            ForEach(offered) { pc in
+                Toggle(state.pcName(pc) + pcNote(pc, blender: blender, isHeld: isHeld),
+                       isOn: Binding(get: { ids.contains(pc.id) },
+                                     set: { isHeld ? state.setHeldPC(job, pc, on: $0) : state.setSplitPC(job, pc, on: $0) }))
+                    .disabled(ids == [pc.id])  // at least one
+            }
+        } label: {
+            Label("\(ids.count) PC\(ids.count == 1 ? "" : "s")", systemImage: "desktopcomputer")
+        }
+        .menuStyle(.button).controlSize(.small).fixedSize()
+        .help("Choose the PCs that render this job. You can change them until it starts.")
+    }
+
+    private func pcNote(_ pc: PCEntry, blender: String, isHeld: Bool) -> String {
+        if state.isOff(pc.id) { return " (switched off, waits)" }
+        if isHeld && job.mode == "animation" && state.pcVersions[pc.id] != nil && !state.canShare(pc, blender: blender) {
+            return " (different Blender, can't share)"
+        }
+        return ""
+    }
+
+    /// Held or split jobs live in this app, not on one PC.
+    private var onThisMac: Bool { job.split == true || job.held == true }
+
     @ViewBuilder private var primaryAction: some View {
-        if job.isActive {
+        if job.state == "held" {
+            Button { state.start(job) } label: { Label("Start", systemImage: "play.fill") }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(job.held == true && state.heldPCIDs(job).isEmpty)
+        } else if job.isActive {
             Button("Cancel") { state.cancel(job) }.controlSize(.small)
         } else if (job.files ?? 0) > 0 {
             if state.downloads[job.id] != nil {
@@ -461,6 +505,7 @@ struct JobRow: View {
         switch job.state {
         case "rendering": return .progress(job.progress ?? 0)
         case "queued": return .queued(position ?? 1)
+        case "held": return .held
         case "done": return .done
         case "failed": return .failed
         default: return .cancelled
@@ -481,6 +526,12 @@ struct JobRow: View {
             return job.note ?? job.progressText
         case "queued":
             return position == 1 ? "Starts next" : "Waiting · \(position ?? 0) in line"
+        case "held":
+            if job.held != true { return "Sent straight to \(state.pcName(of: job) ?? "the PC"); press Start to render it there" }
+            let names = state.cfg.allPCs.filter { state.heldPCIDs(job).contains($0.id) }.map(state.pcName)
+            if names.isEmpty { return "Choose the PCs, then press Start" }
+            return (names.count > 1 && job.mode == "animation" ? "Split between " : "On ") + names.joined(separator: ", ")
+                + " · press Start when you're ready"
         case "done":
             let n = job.files ?? 0
             return job.outputSummary + " ready" + took
@@ -519,22 +570,43 @@ struct SetupSheet: View {
     @StateObject private var form: Box<JobSetup>
     init(setup: JobSetup) { _form = StateObject(wrappedValue: Box(setup)) }
     private var setup: JobSetup { form.value }
-    private var pcCount: Int { state.splitPCs(blender: setup.info.blender).count }
-    private var canSplit: Bool { setup.isAnimation && pcCount >= 2 }
-    private var splitting: Bool { canSplit && setup.split }
-    private var showTarget: Bool { canSplit || state.singlePCs().count > 1 }
-    /// "split", or the id of the PC that gets the whole job.
-    private var target: Binding<String> {
-        Binding(get: { splitting ? "split" : setup.pc },
-                set: { v in
-                    form.value.split = v == "split"
-                    if v != "split" { form.value.pc = v }
+    private var choices: [PCEntry] { state.singlePCs() }
+    private var showTarget: Bool { choices.count > 1 }
+    private var chosen: [PCEntry] { choices.filter { setup.pcs.contains($0.id) } }
+    /// The ticked PCs that can actually share the frames.
+    private var sharing: [PCEntry] { chosen.filter { state.canShare($0, blender: setup.info.blender) } }
+    private var splitting: Bool { setup.isAnimation && sharing.count >= 2 }
+
+    private func ticked(_ pc: PCEntry) -> Binding<Bool> {
+        Binding(get: { setup.pcs.contains(pc.id) },
+                set: { on in
+                    form.value.pcs.removeAll { $0 == pc.id }
+                    if on { form.value.pcs.append(pc.id) }
                 })
     }
-    private var targetName: String {
-        state.singlePCs().first { $0.id == setup.pc }.map(state.pcName) ?? "the main PC"
+
+    /// A still renders on one PC.
+    private var onePC: Binding<String> {
+        Binding(get: { chosen.first?.id ?? "main" }, set: { form.value.pcs = [$0] })
     }
-    private var mismatched: [String] { state.mismatchedPCs(blender: setup.info.blender) }
+
+    private func label(_ pc: PCEntry) -> String {
+        var text = state.pcName(pc)
+        if state.isOff(pc.id) { text += " (switched off, waits)" }
+        else if setup.isAnimation && !state.canShare(pc, blender: setup.info.blender) && state.pcVersions[pc.id] != nil {
+            text += " (different Blender, can't share)"
+        }
+        return text
+    }
+
+    private var targetNote: String {
+        if chosen.isEmpty { return "Tick at least one PC." }
+        if splitting {
+            return "Split between \(sharing.count) PCs. This Mac hands out the frames and joins them, so keep it on until the job is done."
+        }
+        let name = state.pcName(sharing.first ?? chosen[0])
+        return "Renders start to finish on \(name), so you can shut this Mac down and download it when you're back."
+    }
 
     var body: some View {
         let i = setup.info
@@ -593,26 +665,26 @@ struct SetupSheet: View {
                             LabeledContent("Frame", value: "\(setup.frame)")
                         }
                     }
-                    if showTarget {
-                        Picker("Render on", selection: target) {
-                            if canSplit { Text("Split across \(pcCount) PCs").tag("split") }
-                            ForEach(state.singlePCs()) { pc in
-                                Text(state.pcName(pc) + (state.isOff(pc.id) ? " (switched off, waits)" : "")).tag(pc.id)
-                            }
+                    if showTarget && !setup.isAnimation {
+                        Picker("Render on", selection: onePC) {
+                            ForEach(choices) { pc in Text(label(pc)).tag(pc.id) }
                         }
                     }
                 } footer: {
-                    if setup.isAnimation && !mismatched.isEmpty {
-                        Text("Not used, different Blender version from this Mac: \(mismatched.joined(separator: ", ")).")
-                    }
                     if setup.isAnimation && setup.fast {
                         Text("Every \(JobSetup.fastStep)th frame: \((setup.end - setup.start) / JobSetup.fastStep + 1) of \(setup.end - setup.start + 1) frames, about \(JobSetup.fastStep)× faster. Same look as the final render; the video keeps its length but plays at a lower frame rate.")
                     } else if setup.isAnimation {
                         Text("\(setup.end - setup.start + 1) frames, saved as " + (i.video ? "a video in the file's output format." : "numbered PNG files."))
                     }
-                    if showTarget {
-                        Text(splitting ? "This Mac hands out the frames and joins them, so keep it on until the job is done."
-                             : "Renders start to finish on \(targetName), so you can shut this Mac down and download it when you're back.")
+                    if showTarget && !setup.isAnimation { Text(targetNote) }
+                }
+                if showTarget && setup.isAnimation {
+                    Section {
+                        ForEach(choices) { pc in Toggle(label(pc), isOn: ticked(pc)) }
+                    } header: {
+                        Text("Render on")
+                    } footer: {
+                        Text(targetNote)
                     }
                 }
                 Section {
@@ -628,15 +700,16 @@ struct SetupSheet: View {
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
-            .frame(height: (setup.isAnimation ? 300 : 190) + (showTarget ? 70 : 0))
+            .frame(height: (setup.isAnimation ? 300 : 190)
+                   + (!showTarget ? 0 : setup.isAnimation ? 96 + 30 * CGFloat(choices.count) : 70))
             .monospacedDigit()
 
             HStack {
                 Button("Cancel", role: .cancel) { state.discard(setup) }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Add to Queue") { state.send(setup) }
+                Button("Add to Queue") { state.hold(setup) }
                     .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(setup.name.trimmingCharacters(in: .whitespaces).isEmpty || i.camera == nil)
+                    .disabled(setup.name.trimmingCharacters(in: .whitespaces).isEmpty || i.camera == nil || (showTarget && chosen.isEmpty))
             }
             .padding(20)
         }
@@ -655,9 +728,10 @@ struct SettingsView: View {
 
     private func pcEnabled(_ pc: PCEntry) -> Binding<Bool> {
         Binding {
-            pc.id == "main" ? form.value.mainPCInSplits : pc.enabled
+            pc.id == "main" ? form.value.mainPCInSplits : pc.id == "mac" ? form.value.macInSplits : pc.enabled
         } set: { on in
             if pc.id == "main" { form.value.mainPCInSplits = on }
+            else if pc.id == "mac" { form.value.macInSplits = on }
             else if let i = form.value.extraPCs.firstIndex(where: { $0.id == pc.id }) { form.value.extraPCs[i].enabled = on }
         }
     }
@@ -671,12 +745,13 @@ struct SettingsView: View {
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(state.pcName(pc) + (pc.id == "main" ? "  ·  Main" : ""))
-                            Text(pc.testDir.isEmpty ? pc.host : "Test folder").font(.caption).foregroundStyle(.secondary)
+                            Text(pc.id == "mac" ? "Renders with this Mac's own Blender" : pc.testDir.isEmpty ? pc.host : "Test folder")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
                         Toggle("Split jobs", isOn: pcEnabled(pc)).toggleStyle(.checkbox)
                             .help("Takes part when an animation is split between PCs")
-                        if pc.id != "main" {
+                        if pc.id != "main" && pc.id != "mac" {
                             Button { form.value.extraPCs.removeAll { $0.id == pc.id } } label: { Image(systemName: "trash") }
                                 .buttonStyle(.borderless).help("Remove this PC")
                         }

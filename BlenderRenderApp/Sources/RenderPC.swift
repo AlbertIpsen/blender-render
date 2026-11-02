@@ -47,13 +47,20 @@ struct Config: Codable, Equatable {
     var extraPCs: [PCEntry] = []
     /// Whether the PC above helps with split animations.
     var mainPCInSplits = true
+    /// Whether this Mac itself is ticked for split jobs (it's always there to choose).
+    var macInSplits = false
 
     /// The PC above and any extras, in the shape split jobs use.
     var allPCs: [PCEntry] {
-        guard isConfigured else { return extraPCs }
+        let mac = PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: macInSplits,
+                          testDir: Self.thisMacDir)
+        guard isConfigured else { return extraPCs + [mac] }
         return [PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
-                        enabled: mainPCInSplits, testDir: testDir)] + extraPCs
+                        enabled: mainPCInSplits, testDir: testDir)] + extraPCs + [mac]
     }
+
+    /// This Mac's own render queue: the same rq.py as on a PC, run by the Mac's Blender.
+    static var thisMacDir: String { fileURL.deletingLastPathComponent().appendingPathComponent("thismac").path }
 
     /// These settings pointed at one PC, for talking to it through RenderPC.
     func config(for pc: PCEntry) -> Config {
@@ -97,6 +104,7 @@ struct Config: Codable, Equatable {
         autoDownload = try c.decodeIfPresent(Bool.self, forKey: .autoDownload) ?? d.autoDownload
         extraPCs = try c.decodeIfPresent([PCEntry].self, forKey: .extraPCs) ?? d.extraPCs
         mainPCInSplits = try c.decodeIfPresent(Bool.self, forKey: .mainPCInSplits) ?? d.mainPCInSplits
+        macInSplits = try c.decodeIfPresent(Bool.self, forKey: .macInSplits) ?? d.macInSplits
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
     }
 }
@@ -132,6 +140,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
     var split: Bool?
     /// What a split job's PCs are doing, shown in place of the frame and sample line.
     var note: String?
+    /// Waiting on this Mac for its PCs and Start (HeldJob), set by this app.
+    var held: Bool?
     /// Which PC the job is on (PCEntry id), filled in by this app; nil for a split job.
     var pc: String?
 
@@ -198,7 +208,7 @@ struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: Strin
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 10
+    static let protocolVersion = 11
     let cfg: Config
 
     private var sshOptions: [String] {
@@ -247,10 +257,15 @@ struct RenderPC {
         if !cfg.testDir.isEmpty {
             let fm = FileManager.default
             try fm.createDirectory(atPath: cfg.testDir, withIntermediateDirectories: true)
-            for f in try fm.contentsOfDirectory(atPath: src.path) {
+            for f in try fm.contentsOfDirectory(atPath: src.path) where !f.hasSuffix(".exe.new") {
                 let dst = cfg.testDir + "/" + f
                 try? fm.removeItem(atPath: dst)
                 try fm.copyItem(atPath: src.path + "/" + f, toPath: dst)
+            }
+            let settings = cfg.testDir + "/rq_config.json"  // This Mac: its own Blender, on its own GPU (Metal)
+            if !fm.fileExists(atPath: settings) {
+                let json = try JSONSerialization.data(withJSONObject: ["blender": cfg.macBlender, "gpu": true])
+                try json.write(to: URL(fileURLWithPath: settings))
             }
             return
         }
@@ -307,8 +322,11 @@ struct RenderPC {
         } catch { return nil }
     }
 
-    func cancel(_ id: String) async throws { _ = try await rq(["cancel", id]) }
-    func delete(_ id: String) async throws { _ = try await rq(["delete", id]) }
+    /// `by` says who asked (a word, no spaces); the PC writes it to its cancel.log.
+    func cancel(_ id: String, by: String = "app") async throws { _ = try await rq(["cancel", id, "--by=" + by]) }
+    func delete(_ id: String, by: String = "app-cleanup") async throws { _ = try await rq(["delete", id, "--by=" + by]) }
+    /// Let a job that's held on the PC render.
+    func release(_ id: String) async throws { _ = try await rq(["release", id]) }
 
     func log(_ id: String) async throws -> String {
         struct Reply: Decodable { let log: String }
@@ -371,7 +389,7 @@ extension RenderPC {
 }
 
 /// What the Mac's own Blender found in a dropped file.
-struct BlendInfo: Decodable {
+struct BlendInfo: Codable {
     let frame_start: Int
     let frame_end: Int
     let frame_current: Int
