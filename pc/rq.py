@@ -19,6 +19,15 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq preview <id>            raw bytes of the job's first PNG/JPEG (for notification thumbnails)
   rq worker                  render queued jobs one at a time, forever (scheduled task at logon)
   rq ensure-worker           start the worker if it isn't running
+  rq off [--stop]            switch the PC off for rendering: nothing new starts; --stop also puts
+                             the render in progress back in line
+  rq on                      switch it back on
+  rq install-tray            put a new BlenderRenderPC.exe (sent as BlenderRenderPC.exe.new) in place,
+                             make sure it starts at logon, and start it if it isn't running
+
+Switched off (the `off` flag file, also set by the BlenderRender PC tray app), jobs still arrive
+but wait. A render stopped by `off --stop` goes back to queued, so the Mac hands a split batch to
+another PC and a whole job starts again from the beginning once the PC is switched on.
 
 Split jobs: the Mac app hands each PC a batch of frames at a time. A batch is a normal job that
 names a cached .blend (`blend`) and its split job (`parent`), so the file is only sent once.
@@ -46,12 +55,15 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 9
+VERSION = 10
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
 WIN = os.name == "nt"
 TASK_NAME = "BlenderRenderQueue"
+TRAY_TASK = "BlenderRenderPC"
+TRAY = HERE / "BlenderRenderPC.exe"
+OFF = HERE / "off"
 
 
 def config():
@@ -170,7 +182,7 @@ def blender_version():
 
 def cmd_version():
     state = read_json(HERE / "worker_state.json", {})
-    out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""),
+    out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
          "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
 
 
@@ -202,7 +214,7 @@ def cmd_list():
             jobs.append(job)
     jobs.sort(key=lambda j: j.get("submitted", 0))
     state = read_json(HERE / "worker_state.json", {})
-    out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", "")})
+    out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists()})
 
 
 def cmd_receive(b64):
@@ -322,6 +334,56 @@ def cmd_preview(job_id):
     sys.stdout.buffer.flush()
 
 
+def cmd_off(stop):
+    OFF.touch()
+    stopped = []
+    if stop and JOBS.is_dir():
+        for d in JOBS.iterdir():
+            if read_json(d / "status.json", {}).get("state") == "rendering":
+                (d / "requeue").touch()
+                (d / "cancel").touch()
+                stopped.append(d.name)
+    out({"off": True, "stopped": stopped})
+
+
+def cmd_on():
+    OFF.unlink(missing_ok=True)
+    out({"off": False, "worker": ensure_worker()})
+
+
+def cmd_install_tray():
+    """The running tray app notices its exe changed and restarts itself from the new one."""
+    new = HERE / "BlenderRenderPC.exe.new"
+    replaced = False
+    if new.exists():
+        data = new.read_bytes()
+        # A copy set up from the Mac's download carries the setup script after the exe itself.
+        if TRAY.exists() and TRAY.read_bytes().startswith(data):
+            new.unlink()
+        else:
+            for old in HERE.glob("BlenderRenderPC.exe.*.old"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass  # an old copy still running
+            if TRAY.exists():
+                os.replace(TRAY, HERE / f"BlenderRenderPC.exe.{int(time.time())}.old")  # allowed while it runs
+            os.replace(new, TRAY)
+            replaced = True
+    started = False
+    if WIN and TRAY.exists():
+        flags = subprocess.CREATE_NO_WINDOW
+        if subprocess.run(["schtasks", "/query", "/tn", TRAY_TASK], capture_output=True, creationflags=flags).returncode:
+            subprocess.run(["schtasks", "/create", "/tn", TRAY_TASK, "/tr", f'"{TRAY}" --tray', "/sc", "onlogon",
+                            "/it", "/rl", "limited", "/f"], capture_output=True, creationflags=flags)
+        running = subprocess.run(["tasklist", "/fi", "imagename eq BlenderRenderPC.exe", "/nh"], capture_output=True,
+                                 text=True, creationflags=flags).stdout
+        if "BlenderRenderPC.exe" not in running:
+            started = subprocess.run(["schtasks", "/run", "/tn", TRAY_TASK], capture_output=True,
+                                     creationflags=flags).returncode == 0
+    out({"replaced": replaced, "started": started})
+
+
 def cmd_log(job_id):
     p = job_dir(job_id) / "log.txt"
     lines = p.read_text(errors="replace").splitlines()[-200:] if p.exists() else []
@@ -376,7 +438,14 @@ def nudge_awake(hold=None):
 
 
 def render(d, cfg):
-    """Render a job, keeping the PC from sleeping on its own unless the Mac's setting says otherwise."""
+    """Render a job, keeping the PC from sleeping on its own unless the Mac's setting says otherwise.
+
+    Switched off, it leaves the job queued; the wait is here because a worker started by an older
+    rq.py only reloads this function.
+    """
+    if OFF.exists():
+        time.sleep(2)
+        return
     hold = read_json(d / "job.json", {}).get("keep_awake", True)
     if hold:
         nudge_awake(True)
@@ -452,6 +521,12 @@ def render_job(d, cfg):
                 update_status(d, **st)
                 st, last_write = {}, time.time()
     rc = proc.wait()
+    if (d / "requeue").exists():  # stopped by `off --stop`: back in line, from the start
+        shutil.rmtree(d / "out", ignore_errors=True)
+        for flag in ("requeue", "cancel"):
+            (d / flag).unlink(missing_ok=True)
+        update_status(d, state="queued", progress=0.0, saved=0, eta=None, frame=None, started=None)
+        return
     files = sum(1 for p in (d / "out").rglob("*") if p.is_file())
     if (d / "cancel").exists():
         state = "cancelled"
@@ -536,6 +611,12 @@ def main():
         cmd_preview(rest[0])
     elif cmd == "worker":
         cmd_worker()
+    elif cmd == "off":
+        cmd_off("--stop" in rest)
+    elif cmd == "on":
+        cmd_on()
+    elif cmd == "install-tray":
+        cmd_install_tray()
     elif cmd == "ensure-worker":
         out({"worker": ensure_worker()})
     else:

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- .NET Framework 4.8 ships with Windows 10 and 11, so the exe needs nothing installed. Build: pc-app/build.sh -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>BlenderRenderPC</AssemblyName>
+    <RootNamespace>BlenderRenderPC</RootNamespace>
+    <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>BlenderRender PC</Product>
+    <AssemblyTitle>BlenderRender PC</AssemblyTitle>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.Web.Extensions" />
+    <EmbeddedResource Include="AppIcon.ico" LogicalName="AppIcon.ico" />
+  </ItemGroup>
+</Project>

@@ -7,6 +7,8 @@ struct PCLive {
     var error: String?
     /// When the PC last answered.
     var seen: Date?
+    /// Switched off for rendering on the PC itself.
+    var off = false
 }
 
 /// The Render PCs window.
@@ -76,11 +78,13 @@ struct PCCard: View {
 
     private var color: Color {
         if !online { return live == nil && version == nil ? .yellow : .red }
+        if live?.off == true && !rendering { return .orange }
         return rendering ? .accentColor : .green
     }
 
     private var status: String {
         if !online { return live == nil ? "Checking…" : "Offline" }
+        if live?.off == true { return rendering ? "Rendering, switched off after this" : "Switched off on the PC" }
         if rendering { return "Rendering" }
         return active.isEmpty ? "Ready" : "Starting…"
     }

@@ -2,7 +2,8 @@
 
   blender -b input.blend --factory-startup -P assemble_video.py -- <frames dir> <out dir> <b64 options>
 
-Options: name, start, step, pct. The frames already have the file's look baked in, so the view
+Options: name, start, step, pct, and `progress`: a file this keeps the number of frames joined so
+far in, for the app's progress bar. The frames already have the file's look baked in, so the view
 transform is set to Standard to stop it being applied twice. A top channel covers anything already
 in the sequencer, and sound strips keep playing.
 """
@@ -47,4 +48,9 @@ name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in opts.get("name",
 r.use_file_extension = False
 r.filepath = os.path.join(out_dir, name + VIDEO_EXT.get(r.ffmpeg.format, ".mp4"))
 print(f"assemble_video: {len(frames)} frames -> {r.filepath}")
+if opts.get("progress"):
+    def joined(scene, *_):
+        with open(opts["progress"], "w") as fh:
+            fh.write(str(scene.frame_current - start + 1))
+    bpy.app.handlers.render_post.append(joined)
 bpy.ops.render.render(animation=True)

@@ -182,7 +182,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
     var displayName: String { name ?? id }
 }
 
-struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String? }
+/// `off`: switched off for rendering on the PC itself (its tray app); jobs wait until it's back on.
+struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool? }
 
 /// `rq stats`: the GPU fields are missing on a PC without nvidia-smi. VRAM is in MiB.
 struct PCStats: Decodable {
@@ -193,11 +194,11 @@ struct PCStats: Decodable {
     let vram_used: Double?
     let vram_total: Double?
 }
-struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String? }
+struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String?; var off: Bool? }
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 9
+    static let protocolVersion = 10
     let cfg: Config
 
     private var sshOptions: [String] {
@@ -234,6 +235,7 @@ struct RenderPC {
     func connect() async throws -> PCVersion {
         if let v = try? await version(), v.version == Self.protocolVersion { return v }
         try await installScripts()
+        _ = try? await rq(["install-tray"])  // the Windows tray app; rendering works without it
         do { return try await version() } catch {
             throw ShellError(message: "The queue doesn't run on the render PC. Run setup_windows_pc.ps1 on the PC first.\n\n\(error.localizedDescription)")
         }

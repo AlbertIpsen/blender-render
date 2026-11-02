@@ -7,3 +7,5 @@ jobs/
 remote_render.env
 *.bak-*
 *.bak-*/
+pc-app/bin/
+pc-app/obj/

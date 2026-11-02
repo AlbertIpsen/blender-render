@@ -25,7 +25,8 @@ enum SetupScript {
     }
 }
 
-/// The short line that fetches the setup script from this Mac. Works while the view is on screen.
+/// The address of this Mac's setup page (BlenderRender PC.exe), with the PowerShell line as the
+/// alternative. Works while the view is on screen.
 struct SetupCommand: View {
     @StateObject private var server = SetupServer()
     var onPair: ((String) -> Void)?
@@ -33,14 +34,19 @@ struct SetupCommand: View {
 
     var body: some View {
         Group {
-            if let command = server.command {
-                Text(command)
-                    .font(.system(.title3, design: .monospaced).weight(.semibold)).foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10).padding(.vertical, 7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+            if let command = server.command, let page = server.page {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(page)
+                        .font(.system(.title2, design: .monospaced).weight(.semibold)).foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                    Text("Or in PowerShell as Administrator: ").foregroundStyle(.secondary)
+                        + Text(command).font(.system(.callout, design: .monospaced))
+                }
+                .textSelection(.enabled)
             } else if server.locked {
                 Text("Too many wrong codes, so this link was turned off. Close this window and open it again for a new one.")
                     .foregroundStyle(.red)
@@ -70,7 +76,8 @@ struct AddPCView: View {
             Text("Add a Render PC").font(.title2.weight(.semibold))
             Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
             VStack(alignment: .leading, spacing: 6) {
-                Text("2. Open **PowerShell as Administrator** on the PC, type this line and press Return. It works while this window is open.")
+                Text("2. On the PC, open a web browser and go to this address. Download **BlenderRender PC**, open it and click **Set Up This PC**. It works while this window is open.")
+                    .fixedSize(horizontal: false, vertical: true)
                 SetupCommand(onPair: { pairing in
                     code.value = pairing
                     connect()
@@ -84,7 +91,7 @@ struct AddPCView: View {
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("3. When the PC finishes, it sends its pairing code here and connects. If you pasted the script, copy the code it prints (it starts with BR1:).")
+                Text("3. When the PC finishes, it sends its pairing code here and connects. If it can't, it shows a code that starts with BR1:; paste that here.")
                     .fixedSize(horizontal: false, vertical: true)
                 TextField("BR1:…", text: $code.value).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
                 if checking.value || (linkLive.value && code.value.isEmpty) {
@@ -165,7 +172,7 @@ struct GuideView: View {
                         Text("On the PC, install **Blender \(macBlenderVersion)** from blender.org (the same version as this Mac, so files open identically) and the latest **NVIDIA Studio or Game Ready driver**. Keep Blender's default install folder.")
                     }
                     step(2, "Get the setup script to the PC", symbol: "doc.on.clipboard") {
-                        Text("If the PC is on the same network as this Mac, type this line into PowerShell in step 3 instead of pasting. It works while this guide is open.")
+                        Text("If the PC is on the same network as this Mac, open this address in a browser on the PC and run BlenderRender PC from it; it does step 3 for you. Or type the PowerShell line in step 3 instead of pasting. Both work while this guide is open.")
                         SetupCommand()
                         Text("Otherwise, click **Copy Script**: AnyDesk shares the clipboard with the PC, so you can paste it there in step 3. Not using AnyDesk? Choose **Save as File…** and move the file to the PC with a USB stick.").padding(.top, 4)
                         HStack(spacing: 8) {

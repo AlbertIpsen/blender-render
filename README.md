@@ -3,7 +3,8 @@
 Drop a `.blend` on a Mac, render it on a Windows PC with an NVIDIA GPU, and get the results back.
 
 - `BlenderRenderApp/`: the macOS app (SwiftUI)
-- `pc/`, `remote_gpu.py`, `progress.py`: scripts the app installs on the render PC
+- `pc/`, `remote_gpu.py`, `progress.py`: scripts the app installs on the render PC, and `pc/BlenderRenderPC.exe`
+- `pc-app/`: BlenderRender PC, the Windows tray app (C#, .NET Framework 4.8); `pc-app/build.sh` rebuilds the exe
 - `setup_windows_pc.ps1`: one-time PC setup (the app fills in the Mac's SSH key; see Help > Set Up a Render PC)
 - `mcp/`: lets Claude queue renders
 - `remote_render.sh`, `render_status.sh`: command-line rendering (copy `remote_render.env.example` to `remote_render.env`)
@@ -14,11 +15,15 @@ Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and update
 
 ## Several PCs
 
-In Settings, choose Add PC… and follow the three steps. While that window is open, the Mac serves the setup script on the local network (`SetupServer.swift`), so the PC only needs a short line like `iex (irm 192.168.1.20/4821)`, and the script sends its pairing code back when it finishes. The code changes each time and a few wrong tries turn it off; it's plain HTTP, so use Copy Script on a network you don't trust. With two or more PCs switched on, the add sheet offers to split an animation between them.
+In Settings, choose Add PC… and follow the three steps. While that window is open, the Mac serves a page on the local network (`SetupServer.swift`) at an address like `192.168.1.20/4821`. Opened in a browser on the PC, it offers BlenderRender PC.exe with the setup script attached; the app runs the script with one admin prompt and the script sends its pairing code back. The same address also works as a PowerShell line, `iex (irm 192.168.1.20/4821)`. The code changes each time and a few wrong tries turn it off; it's plain HTTP, so use Copy Script on a network you don't trust. With two or more PCs switched on, the add sheet offers to split an animation between them.
 
 The Mac app is the coordinator (`Splitter.swift`): a PC that's free asks for work and gets a batch cut to about 5 minutes at its measured speed, so faster PCs do more and a PC busy with another job is left alone. Split jobs render one at a time, in queue order: the next one starts once every frame of the one ahead is back (the Mac joining the video doesn't hold it up). A PC that drops out loses only its current batch. While rendering, a PC holds itself awake, and during a split the Mac nudges every PC each minute so none sleeps between batches (Settings > Keep all computers awake while rendering). Videos render as PNG frames and the Mac's Blender joins them, so the Mac has to stay on until the job is done. Every PC needs the same Blender major.minor version as the Mac. Each job can instead go whole to one PC, chosen under Render on when it's added: that PC renders the video itself, so the Mac can be shut down and the result downloaded later. Stills go to one PC too.
 
 Claude's `queue_render` hands animations to the app through a folder (`inbox` in the app's support folder), so they split the same way. If the app doesn't answer or fewer than two PCs can take part, the job goes to the main PC.
+
+## BlenderRender PC (the Windows app)
+
+Sits in the taskbar corner of every render PC and starts at logon (scheduled task BlenderRenderPC). Its switch turns the PC off for rendering (`rq off`): jobs that arrive wait, the Mac leaves the PC out of new splits, and a split batch it hasn't started goes to another PC. Switching off during a render asks whether to stop now (the render goes back in line) or let it finish. The Mac installs the app on PCs that were set up before it existed. To change it, edit `pc-app/Program.cs`, run `pc-app/build.sh` (needs the .NET SDK, e.g. in `~/.dotnet`) and bump `protocolVersion`, so PCs get the new exe; the running app restarts itself from it.
 
 ## Publish an update
 

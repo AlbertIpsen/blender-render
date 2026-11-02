@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 $MacKey = "__MAC_PUBLIC_KEY__"
 # Filled in when the PC fetches the script from Add PC, so the pairing code goes straight back to the Mac.
 $PairUrl = "__PAIR_URL__"
+# Where to fetch the BlenderRender PC tray app when this runs from PowerShell; when the tray app itself
+# runs this script, it sets $TrayExe to its own path first.
+$TrayUrl = "__TRAY_URL__"
 $RenderRoot = "C:\GeysierRender"
 if ($MacKey -like "__MAC*") { throw "Use Copy Script in BlenderRender (Help > Set Up a Render PC), or put the Mac's ~/.ssh/id_ed25519.pub in `$MacKey." }
 
@@ -67,6 +70,27 @@ if ($blender) {
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName "BlenderRenderQueue" -Action $action -Trigger $trigger -Settings $settings `
         -Principal $principal -Force | Out-Null
+
+    Write-Host "== BlenderRender PC (taskbar app with the on/off switch)"
+    $tray = "$queue\BlenderRenderPC.exe"
+    try {
+        if ($TrayExe -or ($TrayUrl -notlike "__TRAY*")) {
+            # Windows lets a running exe be renamed but not overwritten.
+            if (Test-Path $tray) { Move-Item $tray "$tray.$(Get-Date -Format yyyyMMddHHmmss).old" -Force }
+            if ($TrayExe) { Copy-Item $TrayExe $tray -Force } else { Invoke-WebRequest $TrayUrl -OutFile $tray -UseBasicParsing }
+        }
+        if (Test-Path $tray) {
+            Unblock-File $tray  # downloaded in a browser: no "are you sure" every time it starts
+            $trayAction = New-ScheduledTaskAction -Execute $tray -Argument "--tray"
+            $traySettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+            Register-ScheduledTask -TaskName "BlenderRenderPC" -Action $trayAction -Trigger $trigger -Settings $traySettings `
+                -Principal $principal -Force | Out-Null
+            if (-not $TrayExe) { Start-ScheduledTask -TaskName "BlenderRenderPC" }  # the tray app starts its own copy
+        }
+    } catch {
+        Write-Host "!! Couldn't install the BlenderRender PC app: $($_.Exception.Message). Rendering works without it." -ForegroundColor Yellow
+    }
 }
 
 $ip = (Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin Dhcp,Manual -ErrorAction SilentlyContinue |

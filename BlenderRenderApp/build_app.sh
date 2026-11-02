@@ -25,6 +25,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/pc"
 cp "$BIN" "$APP/Contents/MacOS/BlenderRender"
 cp "$HERE/Resources/pack_inspect.py" "$HERE/Resources/assemble_video.py" "$REMOTE/setup_windows_pc.ps1" "$APP/Contents/Resources/"
 cp "$REMOTE"/pc/*.py "$REMOTE/remote_gpu.py" "$REMOTE/progress.py" "$APP/Contents/Resources/pc/"
+# The Windows tray app (built by pc-app/build.sh): pushed to PCs as .new (rq install-tray swaps it in,
+# since a running exe can't be overwritten), and served by Add PC for setting up a new PC.
+cp "$REMOTE/pc/BlenderRenderPC.exe" "$APP/Contents/Resources/pc/BlenderRenderPC.exe.new"
+cp "$REMOTE/pc/BlenderRenderPC.exe" "$APP/Contents/Resources/"
 [[ -f "$HERE/Resources/AppIcon.icns" ]] && cp "$HERE/Resources/AppIcon.icns" "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'

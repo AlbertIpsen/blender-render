@@ -213,7 +213,8 @@ final class AppState: ObservableObject {
                         var version = known[pc.id]
                         if version == nil { version = try await rpc.connect() }
                         let list = try await rpc.list()
-                        return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date()))
+                        version?.off = list.off
+                        return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date(), off: list.off == true))
                     } catch {
                         return (pc.id, nil, PCLive(error: error.localizedDescription))
                     }
@@ -246,7 +247,7 @@ final class AppState: ObservableObject {
     func splitPCs(blender: String) -> [PCEntry] {
         let wanted = Self.majorMinor(blender)
         return cfg.allPCs.filter { pc in
-            guard pc.enabled, let v = pcVersions[pc.id] else { return false }
+            guard pc.enabled, let v = pcVersions[pc.id], v.off != true else { return false }
             return Self.majorMinor(v.blender_version ?? "") == wanted
         }
     }
@@ -264,6 +265,9 @@ final class AppState: ObservableObject {
     func pcName(_ pc: PCEntry) -> String {
         pc.name.isEmpty ? pcVersions[pc.id]?.host ?? pc.displayName : pc.displayName
     }
+
+    /// Switched off for rendering on the PC itself, as last reported.
+    func isOff(_ id: String) -> Bool { pcVersions[id]?.off == true }
 
     /// Which PC a job is on, for the row; nil while there's only one PC.
     func pcName(of job: PCJob) -> String? {
@@ -316,15 +320,17 @@ final class AppState: ObservableObject {
     private func pollOtherPCs() async {
         let cfg = self.cfg
         let others = cfg.allPCs.filter { $0.id != "main" }
-        let results = await withTaskGroup(of: (String, [PCJob]?).self) { group in
+        let results = await withTaskGroup(of: (String, PCList?).self) { group in
             for pc in others {
-                group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).list().jobs) }
+                group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).list()) }
             }
-            return await group.reduce(into: [(String, [PCJob]?)]()) { $0.append($1) }
+            return await group.reduce(into: [(String, PCList?)]()) { $0.append($1) }
         }
         guard cfg.allPCs == self.cfg.allPCs else { return }  // settings changed meanwhile
-        for (id, jobs) in results {
-            guard let jobs else { continue }
+        for (id, list) in results {
+            guard let list else { continue }
+            pcVersions[id]?.off = list.off
+            let jobs = list.jobs
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
         }
         for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) && id != "main" { jobsByPC[id] = nil }
@@ -349,6 +355,7 @@ final class AppState: ObservableObject {
             where downloaded[id] == nil {
                 downloaded[id] = path
             }
+            pcVersions["main"]?.off = list.off
             jobsByPC["main"] = list.jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = "main"; return j }  // batches show as their split job
             refreshJobs()
             if case .online(let host, let gpu, _) = status {

@@ -39,6 +39,8 @@ struct SplitState: Codable {
 }
 
 private struct BatchFailed: Error { let reason: String }
+/// The PC was switched off on its own end before finishing the batch; not the batch's fault.
+private struct HandedBack: Error {}
 
 /// Runs one split job from this Mac, which works as the coordinator: a PC that's free asks for work
 /// and gets a batch cut to its measured speed, so a faster GPU does more and no PC holds up the end
@@ -50,6 +52,8 @@ final class SplitRun {
     private let onChange: () -> Void
     private var batchProgress: [Int: Double] = [:]
     private var activity: [String: String] = [:]
+    /// While this Mac joins the frames into the video: frames joined so far, and since when.
+    private var joining: (done: Int, since: Date)?
     private var supervisor: Task<Void, Never>?
     /// PCs that failed too often and sit out the rest of this job.
     /// Whether a job ahead of this one in the queue still has frames for this PC.
@@ -63,6 +67,7 @@ final class SplitRun {
     private static let batchSeconds = 300.0
     private static let maxBatchFrames = 60
     private static let busy = "busy with another job"
+    private static let off = "switched off on the PC"
     /// Until a PC has been measured.
     private static let firstBatchFrames = 2
 
@@ -144,6 +149,19 @@ final class SplitRun {
         j.split = true
         let done = Double(state.framesDone) + batchProgress.reduce(0.0) { $0 + $1.value * Double(state.frames(in: state.batches[$1.key])) }
         j.progress = state.state == "done" ? 1 : min(1, done / Double(state.frameCount))
+        if let joining, state.state == "rendering" {
+            let total = state.frameCount
+            j.progress = Double(joining.done) / Double(max(total, 1))
+            j.frame = state.start + joining.done * state.step  // past the first: "Estimating time left…"
+            j.note = state.video ? "Joining the frames into the video on this Mac · \(joining.done) of \(total)"
+                                 : "Moving the frames into the download folder"
+            let now = Date().timeIntervalSince1970, spent = now - joining.since.timeIntervalSince1970
+            if joining.done >= 10 {
+                j.eta = spent / Double(joining.done) * Double(total - joining.done)
+                j.eta_at = now
+            }
+            return j
+        }
         if state.state == "rendering" && !isWaiting {
             let now = Date().timeIntervalSince1970
             if done >= 1 {
@@ -159,7 +177,7 @@ final class SplitRun {
     /// Not started: every PC is on something else. Once frames are in, a pause doesn't move it back.
     private var isWaiting: Bool {
         running && state.framesDone == 0 && !state.batches.contains { $0.status == "running" }
-            && activity.values.allSatisfy { $0 == Self.busy }
+            && activity.values.allSatisfy { $0 == Self.busy || $0 == Self.off }
     }
 
     /// True while any PC still has frames of this job to render; later jobs wait until then.
@@ -219,7 +237,16 @@ final class SplitRun {
                 for job in strays { try? await rpc.delete(job) }
                 strays = []
                 // Pull, don't push: a batch queued behind other work would sit there while other PCs go idle.
-                if try await rpc.list().jobs.contains(where: \.isActive) {
+                let list = try await rpc.list()
+                if list.off == true {
+                    if activity[pc.id] != Self.off {
+                        activity[pc.id] = Self.off
+                        changed()
+                    }
+                    try? await Task.sleep(for: .seconds(5))
+                    continue
+                }
+                if list.jobs.contains(where: \.isActive) {
                     if activity[pc.id] != Self.busy {
                         activity[pc.id] = Self.busy
                         changed()
@@ -231,6 +258,10 @@ final class SplitRun {
                 do {
                     try await render(i, on: rpc, pc: pc)
                     failures = 0
+                } catch is HandedBack {
+                    batchProgress[i] = nil
+                    release(i)
+                    note("\(pc.displayName) was switched off; frames \(state.batches[i].start)-\(state.batches[i].end) go to another PC")
                 } catch let e as BatchFailed {
                     batchProgress[i] = nil
                     failures += 1
@@ -321,8 +352,13 @@ final class SplitRun {
         var lastHeard = Date()
         while running {
             do {
-                let found = try await rpc.list().jobs.first { $0.id == job }
+                let list = try await rpc.list()
+                let found = list.jobs.first { $0.id == job }
                 lastHeard = Date()
+                if list.off == true && found?.state != "rendering" && found?.state != "done" {
+                    try? await rpc.delete(job)
+                    throw HandedBack()
+                }
                 switch found?.state {
                 case "queued", "rendering":
                     batchProgress[i] = found?.progress ?? 0
@@ -332,6 +368,8 @@ final class SplitRun {
                     var speeds = state.speeds ?? [:]
                     speeds[pc.id] = speeds[pc.id].map { ($0 + perFrame) / 2 } ?? perFrame
                     state.speeds = speeds
+                    activity[pc.id] = "sending frames \(b.start)–\(b.end) to this Mac"
+                    onChange()
                     try await collect(i, job: job, on: rpc)
                     return
                 case "failed":
@@ -342,6 +380,8 @@ final class SplitRun {
                     throw BatchFailed(reason: "the job disappeared from the PC")
                 }
             } catch let e as BatchFailed {
+                throw e
+            } catch let e as HandedBack {
                 throw e
             } catch {
                 if Date().timeIntervalSince(lastHeard) > Self.silenceLimit { throw error }
@@ -377,7 +417,10 @@ final class SplitRun {
         guard running else { return }
         guard allDone else { return fail("No PC could finish the job. Open the log for details.") }
         for pc in state.pcs { try? await rpc(pc).cacheDrop(state.id) }
-        activity = ["mac": "joining"]
+        activity = [:]
+        joining = (0, Date())
+        changed()
+        defer { joining = nil }
         let safe = state.name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd-HHmmss"
@@ -413,8 +456,19 @@ final class SplitRun {
         guard let script = Bundle.main.resourceURL?.appendingPathComponent("assemble_video.py") else {
             throw ShellError(message: "assemble_video.py missing from the app bundle")
         }
-        let json = try JSONSerialization.data(withJSONObject: ["name": state.name, "start": state.start,
-                                                               "step": state.step, "pct": state.pct] as [String: Any])
+        let progress = dir.appendingPathComponent("join_progress")
+        let json = try JSONSerialization.data(withJSONObject: ["name": state.name, "start": state.start, "step": state.step,
+                                                               "pct": state.pct, "progress": progress.path] as [String: Any])
+        let watch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if let text = try? String(contentsOf: progress, encoding: .utf8), let n = Int(text), let self {
+                    self.joining?.done = n
+                    self.onChange()
+                }
+            }
+        }
+        defer { watch.cancel(); try? FileManager.default.removeItem(at: progress) }
         let b64 = json.base64EncodedString().replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         _ = try await Shell.run(cfg.macBlender, ["-b", blend.path, "--factory-startup", "-P", script.path,

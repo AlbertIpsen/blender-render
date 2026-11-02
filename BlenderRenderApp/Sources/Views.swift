@@ -596,7 +596,9 @@ struct SetupSheet: View {
                     if showTarget {
                         Picker("Render on", selection: target) {
                             if canSplit { Text("Split across \(pcCount) PCs").tag("split") }
-                            ForEach(state.singlePCs()) { pc in Text(state.pcName(pc)).tag(pc.id) }
+                            ForEach(state.singlePCs()) { pc in
+                                Text(state.pcName(pc) + (state.isOff(pc.id) ? " (switched off, waits)" : "")).tag(pc.id)
+                            }
                         }
                     }
                 } footer: {
@@ -665,7 +667,8 @@ struct SettingsView: View {
             Section {
                 ForEach(form.value.allPCs) { pc in
                     HStack(spacing: 10) {
-                        Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : .green).frame(width: 8, height: 8)
+                        Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : state.isOff(pc.id) ? .orange : .green)
+                            .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(state.pcName(pc) + (pc.id == "main" ? "  ·  Main" : ""))
                             Text(pc.testDir.isEmpty ? pc.host : "Test folder").font(.caption).foregroundStyle(.secondary)
