@@ -540,12 +540,12 @@ struct JobRow: View {
                 + " · press Start when you're ready"
         case "done":
             let n = job.files ?? 0
-            return job.outputSummary + " ready" + took
+            return job.outputSummary + " ready" + took + when("finished")
         case "failed":
             return (job.error ?? "Render failed – open the Blender log for details")
-                + ((job.files ?? 0) > 0 ? " · partial results" : "")
+                + ((job.files ?? 0) > 0 ? " · partial results" : "") + when("stopped")
         case "cancelled":
-            return "Cancelled" + ((job.files ?? 0) > 0 ? " · partial results" : "")
+            return "Cancelled" + ((job.files ?? 0) > 0 ? " · partial results" : "") + when("")
         default:
             return job.state ?? ""
         }
@@ -554,6 +554,23 @@ struct JobRow: View {
     private var took: String {
         guard let s = job.started, let e = job.ended else { return "" }
         return " · rendered in " + Self.duration(Int(e - s))
+    }
+
+    /// " · finished today at 14:32", "… yesterday at 09:05", "… Mon 3 Nov at 22:10".
+    private func when(_ verb: String) -> String {
+        guard let e = job.ended else { return "" }
+        return " · " + (verb.isEmpty ? "" : verb + " ") + Self.stamp(Date(timeIntervalSince1970: e))
+    }
+
+    static func stamp(_ d: Date) -> String {
+        let cal = Calendar.current
+        let time = d.formatted(date: .omitted, time: .shortened)
+        if cal.isDateInToday(d) { return "today at " + time }
+        if cal.isDateInYesterday(d) { return "yesterday at " + time }
+        let sameYear = cal.isDate(d, equalTo: Date(), toGranularity: .year)
+        let day = d.formatted(sameYear ? .dateTime.weekday(.abbreviated).day().month(.abbreviated)
+                                       : .dateTime.day().month(.abbreviated).year())
+        return day + " at " + time
     }
 
     static func duration(_ secs: Int) -> String {

@@ -137,6 +137,8 @@ def describe(job, position=None):
         out["files"] = job.get("files", 0)
         if job.get("started") and job.get("ended"):
             out["render_time"] = duration(job["ended"] - job["started"])
+        if job.get("ended"):
+            out["finished_at"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(job["ended"]))
         if job.get("error"):
             out["error"] = job["error"]
     return out
