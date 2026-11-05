@@ -347,7 +347,7 @@ namespace BlenderRenderPC
     /// Keeps the queue scripts and the app itself up to date, without a Mac.
     static class SelfUpdate
     {
-        const string Latest = "https://api.github.com/repos/AlbertIpsen/blender-render-releases/releases/latest";
+        const string Latest = "https://api.github.com/repos/AlbertIpsen/blender-render/releases/latest";
         static string Stamp => Path.Combine(Paths.Queue, "pc_release.txt");
 
         public static void Run()

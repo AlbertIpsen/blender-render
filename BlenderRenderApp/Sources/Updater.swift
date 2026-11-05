@@ -1,9 +1,9 @@
 import AppKit
 import Foundation
 
-/// Updates are GitHub releases of a public downloads repo, so no login is needed. The source stays private.
+/// Updates are GitHub releases of the public repo, so no login is needed.
 enum Updater {
-    static let repo = "AlbertIpsen/blender-render-releases"
+    static let repo = "AlbertIpsen/blender-render"
     static let asset = "BlenderRender.zip"
 
     struct Release: Decodable, Equatable {

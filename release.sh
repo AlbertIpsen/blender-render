@@ -43,8 +43,10 @@ git add -A
 git commit -q -m "Release v$V" -m "$NOTES" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git tag "v$V"
 git push -q origin main "v$V"
-gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip --title "v$V" --notes "$NOTES"
-# The public downloads repo is what the apps update from: the Mac app's zip, and BlenderRender PC (also the
-# download for a new PC). The private release above keeps older apps moving.
-gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip pc/BlenderRenderPC.exe --repo AlbertIpsen/blender-render-releases --title "v$V" --notes "$NOTES"
+# What the apps update from: the Mac app's zip, and BlenderRender PC (also the download for a new PC).
+gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip pc/BlenderRenderPC.exe --title "v$V" --notes "$NOTES"
+# Apps from before v1.5.1 still look in the old downloads repo; until it's deleted, they get the release there too.
+if gh repo view AlbertIpsen/blender-render-releases >/dev/null 2>&1; then
+    gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip pc/BlenderRenderPC.exe --repo AlbertIpsen/blender-render-releases --title "v$V" --notes "$NOTES"
+fi
 echo "released v$V"

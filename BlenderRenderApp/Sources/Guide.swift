@@ -213,7 +213,7 @@ struct GuideView: View {
         .frame(width: 600, height: 440)
     }
 
-    static let downloadURL = "github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe"
+    static let downloadURL = "github.com/AlbertIpsen/blender-render/releases/latest/download/BlenderRenderPC.exe"
 
     private var macBlenderVersion: String {
         // "/Applications/Blender.app/Contents/MacOS/Blender" -> read the app's version, falls back to "5.2"

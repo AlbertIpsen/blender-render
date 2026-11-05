@@ -13,10 +13,10 @@ Drop a `.blend` on a Mac, render it on the other computers on your network (Wind
 
 **Downloads** (always the latest version):
 
-- Mac: [BlenderRender.zip](https://github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRender.zip)
-- Windows PC: [BlenderRenderPC.exe](https://github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe)
+- Mac: [BlenderRender.zip](https://github.com/AlbertIpsen/blender-render/releases/latest/download/BlenderRender.zip)
+- Windows PC: [BlenderRenderPC.exe](https://github.com/AlbertIpsen/blender-render/releases/latest/download/BlenderRenderPC.exe)
 
-Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and updated from the public [blender-render-releases](https://github.com/AlbertIpsen/blender-render-releases) repo, which holds only the downloads, so no GitHub account is needed. The first time it looks for other computers, macOS asks to allow BlenderRender on the local network: choose **Allow**.
+Needs macOS 14+ and Blender in `/Applications`. Both apps download their updates from this repo's releases, so no GitHub account is needed. The first time it looks for other computers, macOS asks to allow BlenderRender on the local network: choose **Allow**.
 
 ## Set up a Windows render PC
 
@@ -28,7 +28,7 @@ About 10 minutes, once per PC. You need to be at the PC, or connected to it with
 2. Install the latest NVIDIA Studio or Game Ready driver.
 3. Connect the PC to the same network as the Mac, with Ethernet if you can: frames come back much faster than over Wi-Fi.
 
-**1. Download BlenderRender PC on the PC.** Open [github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe](https://github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe) in a browser on the PC.
+**1. Download BlenderRender PC on the PC.** Open [github.com/AlbertIpsen/blender-render/releases/latest/download/BlenderRenderPC.exe](https://github.com/AlbertIpsen/blender-render/releases/latest/download/BlenderRenderPC.exe) in a browser on the PC.
 
 - If the browser says the file isn't commonly downloaded, choose **Keep**.
 - If Windows says it protected your PC, click **More info**, then **Run anyway**. The app isn't signed by a publisher Windows knows.
