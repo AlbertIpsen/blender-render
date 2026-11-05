@@ -28,6 +28,8 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq pause                   the Mac's Pause All: freeze the render in progress where it is and start
                              nothing new (separate from `off`, which is the PC owner's switch)
   rq resume                  carry on from the same frame and sample
+  rq share on|off            let other BlenderRender computers send this one jobs (rqnet.py), or not
+  rq restart-worker          restart the worker when nothing is rendering, so it runs this rq.py
   rq install-tray            put a new BlenderRenderPC.exe (sent as BlenderRenderPC.exe.new) in place,
                              make sure it starts at logon, and start it if it isn't running
 
@@ -145,6 +147,72 @@ def worker_running():
     return False  # closing the file released our probe lock
 
 
+def agent_running():
+    HERE.joinpath("agent.lock").touch()
+    with open(HERE / "agent.lock", "r+") as fh:
+        if not _try_lock(fh):
+            return True
+    return False
+
+
+def kill(pid):
+    try:
+        if WIN:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.kill(pid, 15)
+    except OSError:
+        pass
+
+
+def ensure_agent():
+    """Keep rqnet.py serving, and on the version that's on disk. The worker calls this every few seconds."""
+    net = HERE / "rqnet.py"
+    if not net.exists():
+        return False
+    m = re.search(r"^VERSION = (\d+)", net.read_text(encoding="utf-8"), re.M)
+    want = int(m.group(1)) if m else 0
+    if agent_running():
+        info = read_json(HERE / "agent.json", {})
+        if info.get("version") == want or not info.get("pid"):
+            return True
+        kill(info["pid"])
+        for _ in range(20):
+            time.sleep(0.25)
+            if not agent_running():
+                break
+    if WIN:  # detached, so it outlives whoever started it
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008  # DETACHED_PROCESS
+        subprocess.Popen([sys.executable, str(net), "serve"], cwd=HERE, creationflags=flags, close_fds=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen([sys.executable, str(net), "serve"], cwd=HERE, start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+def cmd_restart_worker():
+    """An older worker doesn't keep rqnet.py running; replace it, but never mid-render."""
+    if JOBS.is_dir() and any(read_json(d / "status.json", {}).get("state") == "rendering" for d in JOBS.iterdir()):
+        out({"restarted": False, "worker": worker_running()})
+        return
+    pid = read_json(HERE / "worker.json", {}).get("pid")
+    if pid:
+        kill(pid)
+    elif WIN:  # a worker from before worker.json
+        ps = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*rq.py*worker*' } | "
+              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        subprocess.run(["pkill", "-f", f"{HERE / 'rq.py'} worker"], capture_output=True)
+    for _ in range(20):
+        if not worker_running():
+            break
+        time.sleep(0.25)
+    out({"restarted": True, "worker": ensure_worker()})
+
+
 def ensure_worker():
     if worker_running():
         return True
@@ -190,7 +258,8 @@ def blender_version():
 def cmd_version():
     state = read_json(HERE / "worker_state.json", {})
     out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
-         "paused": PAUSED.exists(), "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
+         "paused": PAUSED.exists(), "share": (HERE / "share").exists(),
+         "agent": agent_running(), "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
 
 
 def cmd_stats():
@@ -222,7 +291,7 @@ def cmd_list():
     jobs.sort(key=lambda j: j.get("submitted", 0))
     state = read_json(HERE / "worker_state.json", {})
     out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
-         "paused": PAUSED.exists()})
+         "paused": PAUSED.exists(), "share": (HERE / "share").exists()})
 
 
 def cmd_receive(b64):
@@ -618,11 +687,19 @@ def cmd_worker():
     lock = open(HERE / "worker.lock", "r+")
     if not _try_lock(lock):
         return  # another worker already runs
+    write_json(HERE / "worker.json", {"pid": os.getpid()})
     JOBS.mkdir(exist_ok=True)
     for d in JOBS.iterdir():  # a previous worker died mid-render
         if read_json(d / "status.json", {}).get("state") == "rendering":
             update_status(d, state="failed", ended=time.time(), error="render PC worker restarted")
+    agent_check = 0.0
     while True:
+        if time.time() - agent_check > 10:
+            agent_check = time.time()
+            try:
+                ensure_agent()
+            except Exception:
+                pass  # rendering for this PC's own Mac works without it
         queued = []
         for d in JOBS.iterdir():
             st = read_json(d / "status.json", {})
@@ -687,6 +764,14 @@ def main():
         cmd_pause()
     elif cmd == "resume":
         cmd_resume()
+    elif cmd == "share":
+        if rest and rest[0] == "on":
+            (HERE / "share").touch()
+        elif rest and rest[0] == "off":
+            (HERE / "share").unlink(missing_ok=True)
+        out({"share": (HERE / "share").exists()})
+    elif cmd == "restart-worker":
+        cmd_restart_worker()
     elif cmd == "install-tray":
         cmd_install_tray()
     elif cmd == "ensure-worker":

@@ -1,10 +1,12 @@
-# One-time setup of the Windows render PC for remote/remote_render.sh.
-# Run in PowerShell *as Administrator* on the PC:
+# One-time setup of a Windows render PC. BlenderRender PC runs it (one admin prompt); or run it in
+# PowerShell *as Administrator* on the PC:
 #   powershell -ExecutionPolicy Bypass -File setup_windows_pc.ps1
 #
-# Installs and starts the OpenSSH server, opens port 22 on private networks, authorises the
-# Mac's SSH key, creates the render folder and the render queue the BlenderRender app uses
-# (scheduled task BlenderRenderQueue), then prints what goes into remote_render.env / the app.
+# Creates the render folder and the render queue (scheduled task BlenderRenderQueue), which also keeps
+# rqnet.py running so Macs with BlenderRender on the network find the PC and send it jobs (TCP 48211,
+# opened for private networks). With a Mac's SSH key filled in (the Mac's Copy Script, or the copy
+# of BlenderRender PC its Add PC page serves) it also sets up the OpenSSH server for that Mac and
+# prints a pairing code; BlenderRender PC downloaded on its own skips that.
 $ErrorActionPreference = "Stop"
 
 # The BlenderRender app fills this in with the Mac's own public key when it copies or saves the script.
@@ -12,16 +14,20 @@ $MacKey = "__MAC_PUBLIC_KEY__"
 # Filled in when the PC fetches the script from Add PC, so the pairing code goes straight back to the Mac.
 $PairUrl = "__PAIR_URL__"
 # Where to fetch the BlenderRender PC tray app when this runs from PowerShell; when the tray app itself
-# runs this script, it sets $TrayExe to its own path first.
+# runs this script, it sets $TrayExe to its own path first, and $ScriptsDir to the queue scripts it carries.
 $TrayUrl = "__TRAY_URL__"
 $RenderRoot = "C:\GeysierRender"
-if ($MacKey -like "__MAC*") { throw "Use Copy Script in BlenderRender (Help > Set Up a Render PC), or put the Mac's ~/.ssh/id_ed25519.pub in `$MacKey." }
+$WithSsh = $MacKey -notlike "__MAC*"
+if (-not $WithSsh -and -not $TrayExe -and $TrayUrl -like "__TRAY*") {
+    throw "Use BlenderRender PC to set this PC up, or Copy Script in BlenderRender on the Mac (Help > Set Up a Render PC)."
+}
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run this from an Administrator PowerShell (right-click > Run as administrator)."
 }
 
+if ($WithSsh) {
 Write-Host "== OpenSSH server"
 $cap = Get-WindowsCapability -Online -Name "OpenSSH.Server*"
 if ($cap.State -ne "Installed") { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }
@@ -45,6 +51,7 @@ $userKeys = "$userSsh\authorized_keys"
 if (-not (Test-Path $userKeys) -or -not (Select-String -Path $userKeys -SimpleMatch $MacKey -Quiet)) {
     Add-Content -Path $userKeys -Value $MacKey
 }
+}
 
 New-Item -ItemType Directory -Force -Path $RenderRoot | Out-Null
 
@@ -60,6 +67,12 @@ if ($blender) {
         Where-Object FullName -like "*\python\bin\python.exe" | Select-Object -First 1
     if (-not $py) { throw "Blender's bundled python.exe not found under $(Split-Path $blender.FullName)" }
     @{ blender = $blender.FullName; gpu = $true } | ConvertTo-Json | Set-Content "$queue\rq_config.json" -Encoding ascii
+    if ($ScriptsDir) { Copy-Item "$ScriptsDir\*" $queue -Force }  # otherwise the Mac copies them when it connects
+    New-Item -ItemType File -Force -Path "$queue\share" | Out-Null  # other BlenderRender computers may send it jobs
+    if (-not (Get-NetFirewallRule -DisplayName "BlenderRender network" -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName "BlenderRender network" -Enabled True -Direction Inbound -Protocol TCP `
+            -LocalPort 48211 -Action Allow -Profile Private,Domain | Out-Null
+    }
     "@`"$($py.FullName)`" `"%~dp0rq.py`" %*" | Set-Content "$queue\rq.cmd" -Encoding ascii
     # The worker renders queued jobs one at a time; it starts at logon and the Mac app starts it on demand.
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -WorkingDirectory $queue `
@@ -70,6 +83,7 @@ if ($blender) {
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName "BlenderRenderQueue" -Action $action -Trigger $trigger -Settings $settings `
         -Principal $principal -Force | Out-Null
+    if (Test-Path "$queue\rq.py") { Start-ScheduledTask -TaskName "BlenderRenderQueue" }  # and with it rqnet.py
 
     Write-Host "== BlenderRender PC (taskbar app with the on/off switch)"
     $tray = "$queue\BlenderRenderPC.exe"
@@ -104,7 +118,7 @@ Write-Host "WIN_HOST=$ip   (computer name: $env:COMPUTERNAME)"
 Write-Host "WIN_USER=$env:USERNAME"
 Write-Host "WIN_BLENDER=$(if ($blender) { $blender.FullName } else { 'NOT FOUND - where is blender.exe?' })"
 Write-Host "GPU=$gpu"
-if ($blender) {
+if ($blender -and $WithSsh) {
     $pairing = @{ host = $ip; user = $env:USERNAME; name = $env:COMPUTERNAME } | ConvertTo-Json -Compress
     Write-Host ""
     Write-Host "== Pairing code. Copy this line into Add PC in BlenderRender:"

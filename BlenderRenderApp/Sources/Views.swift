@@ -175,14 +175,24 @@ struct SetUpPCView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        ContentUnavailableView {
-            Label("Connect Your Render PC", systemImage: "desktopcomputer.and.arrow.down")
-        } description: {
-            Text("BlenderRender sends your .blend files to a Windows PC with an NVIDIA GPU. Setting one up takes about 10 minutes.")
-        } actions: {
-            Button("Show Setup Guide") { state.showGuide = true }.buttonStyle(.borderedProminent).controlSize(.large)
-            Button("I've Already Run the Script – Open Settings") { openSettings() }.buttonStyle(.link)
+        VStack(spacing: 14) {
+            Image(systemName: "desktopcomputer.and.arrow.down").font(.system(size: 40)).foregroundStyle(.secondary)
+            Text("Add Your Render Computers").font(.title2.weight(.semibold))
+            Text("BlenderRender sends your .blend files to other computers to render: Windows PCs with BlenderRender PC, and Macs with BlenderRender. Those on this network show up here.")
+                .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 420)
+            if !state.nearbyToAdd.isEmpty {
+                VStack(spacing: 10) {
+                    ForEach(state.nearbyToAdd) { n in NearbyRow(n: n) { state.addToPool(n) } }
+                }
+                .padding(12)
+                .frame(width: 400)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
+            }
+            Button("Set Up a New PC") { state.showGuide = true }.buttonStyle(.borderedProminent).controlSize(.large)
+            Button("Add a PC by Address – Open Settings") { openSettings() }.buttonStyle(.link)
         }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -788,13 +798,18 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
+                ShareToggle(isOn: Binding(get: { form.value.shareThisMac },
+                                          set: { form.value.shareThisMac = $0; state.setShareThisMac($0) }))
+            }
+            Section {
                 ForEach(form.value.allPCs) { pc in
                     HStack(spacing: 10) {
                         Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : state.isOff(pc.id) ? .orange : .green)
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(state.pcName(pc) + (pc.id == "main" ? "  ·  Main" : ""))
-                            Text(pc.id == "mac" ? "Renders with this Mac's own Blender" : pc.testDir.isEmpty ? pc.host : "Test folder")
+                            Text(pc.id == "mac" ? "Renders with this Mac's own Blender" : !pc.testDir.isEmpty ? "Test folder"
+                                 : pc.isNetwork ? "\(pc.host) · found on the network" : pc.host)
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -804,7 +819,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                Button("Add PC…") { addingPC.value = true }
+                Button("Add PC by Address…") { addingPC.value = true }
             } header: {
                 Text("Render PCs")
             } footer: {
@@ -812,6 +827,21 @@ struct SettingsView: View {
                     Text("Each job waits in the queue until you switch on its PCs and press Start: one PC renders the whole job, two or more split an animation. A split needs this Mac on until it's done; a job on one PC doesn't.")
                     Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
                 }
+            }
+            Section {
+                if state.nearbyToAdd.isEmpty {
+                    Text("Computers with BlenderRender on this network show up here.").foregroundStyle(.secondary)
+                }
+                ForEach(state.nearbyToAdd) { n in
+                    NearbyRow(n: n) {
+                        form.value.extraPCs.append(PCEntry(n))
+                        state.saveConfig(form.value)
+                    }
+                }
+            } header: {
+                Text("On This Network")
+            } footer: {
+                Text("A new PC shows up once BlenderRender PC is installed on it; a Mac, once BlenderRender is open with Allow this computer to do render jobs. Add puts it in your render pool.")
             }
             Section("Downloads") {
                 LabeledContent("Save renders to") {

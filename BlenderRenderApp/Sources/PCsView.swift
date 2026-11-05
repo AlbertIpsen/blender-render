@@ -27,9 +27,21 @@ struct PCCards: View {
 
     var body: some View {
         VStack(spacing: 12) {
+            ShareToggle(isOn: Binding(get: { state.cfg.shareThisMac }, set: { state.setShareThisMac($0) }))
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
                        batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id), isMain: pc.id == "main")
+            }
+            if !state.nearbyToAdd.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("On this network").font(.headline)
+                    ForEach(state.nearbyToAdd) { n in NearbyRow(n: n) { state.addToPool(n) } }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.quaternary))
             }
         }
         .task { await state.watchPCs() }
@@ -167,5 +179,47 @@ struct PCCard: View {
         if batchesDone > 0 { parts.append("\(batchesDone) split \(batchesDone == 1 ? "batch" : "batches") done here") }
         if let speed { parts.append(String(format: "%.1f s per frame", speed)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// "Allow this computer to do render jobs": other BlenderRender computers may use This Mac's GPU.
+struct ShareToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Allow this computer to do render jobs").font(.body.weight(.medium))
+                Text("Other Macs with BlenderRender on this network can add this Mac to their render pool and render on its GPU.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.switch)
+    }
+}
+
+/// A BlenderRender computer on the network that isn't in the pool yet.
+struct NearbyRow: View {
+    let n: Nearby
+    let add: () -> Void
+
+    private var detail: String {
+        var parts = [n.isMac ? "Mac" : "PC"]
+        if !n.gpuName.isEmpty { parts.append(n.gpuName) }
+        if !n.blender.isEmpty { parts.append("Blender " + n.blender) }
+        if !n.allow { parts.append("doesn't take render jobs now") } else if n.rendering { parts.append("rendering") }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: n.isMac ? "desktopcomputer" : "pc").frame(width: 22).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(n.name)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Add", action: add)
+        }
     }
 }

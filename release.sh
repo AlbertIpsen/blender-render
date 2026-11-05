@@ -34,6 +34,8 @@ if [[ -n "$LAST" ]] && ! git diff --quiet "$LAST" -- pc remote_gpu.py progress.p
 fi
 
 echo "$V" > VERSION
+# BlenderRender PC carries the queue scripts, so it's rebuilt with them (needs the .NET SDK in ~/.dotnet).
+if [[ -x "${DOTNET:-$HOME/.dotnet/dotnet}" ]]; then pc-app/build.sh; else echo "note: no .NET SDK, so pc/BlenderRenderPC.exe isn't rebuilt"; fi
 BlenderRenderApp/build_app.sh --no-install
 ditto -c -k --norsrc --keepParent BlenderRenderApp/build/BlenderRender.app BlenderRenderApp/build/BlenderRender.zip
 
@@ -42,6 +44,7 @@ git commit -q -m "Release v$V" -m "$NOTES" -m "Co-Authored-By: Claude Opus 5.5 <
 git tag "v$V"
 git push -q origin main "v$V"
 gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip --title "v$V" --notes "$NOTES"
-# The public downloads repo is what the app updates from. The private release above keeps older apps moving.
-gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip --repo AlbertIpsen/blender-render-releases --title "v$V" --notes "$NOTES"
+# The public downloads repo is what the apps update from: the Mac app's zip, and BlenderRender PC (also the
+# download for a new PC). The private release above keeps older apps moving.
+gh release create "v$V" BlenderRenderApp/build/BlenderRender.zip pc/BlenderRenderPC.exe --repo AlbertIpsen/blender-render-releases --title "v$V" --notes "$NOTES"
 echo "released v$V"

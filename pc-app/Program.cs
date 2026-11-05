@@ -1,11 +1,14 @@
 // BlenderRender PC: the Windows side of BlenderRender, in the taskbar corner.
 //
-// Downloaded from the Mac's Add PC page, it sets the PC up (one admin prompt) and pairs it with the
-// Mac. After that it starts at logon and has one switch: take render jobs, or not. Switched off, rq.py
-// starts nothing new (see `rq off` there); the Mac hands split work to other PCs.
+// Downloaded from GitHub (or a Mac's Add PC page), it sets the PC up (one admin prompt): the render
+// queue and rqnet.py, which lets Macs with BlenderRender on the network find the PC and send it jobs.
+// After that it starts at logon and has one switch: allow render jobs, or not. Switched off, rq.py
+// starts nothing new (see `rq off` there); Macs hand split work to other computers. It keeps itself
+// and the queue scripts it carries up to date from the public releases on GitHub.
 //
-// The Mac appends the filled-in setup script to the exe it serves: script bytes, their length as a
-// 4-byte little-endian int, then the 8 bytes "BRSETUP1". Without it, the app can't set a PC up.
+// A Mac's Add PC page appends its filled-in setup script (with the Mac's SSH key and pairing link) to
+// the exe it serves: script bytes, their length as a 4-byte little-endian int, then the 8 bytes
+// "BRSETUP1". Without it, the app uses the setup script it carries, which skips SSH.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -13,6 +16,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -56,8 +60,37 @@ namespace BlenderRenderPC
             single.ReleaseMutex();
         }
 
-        /// The setup script the Mac appended to this exe, or null.
-        public static string EmbeddedScript()
+        /// Set up from a Mac's Add PC page: its script, with SSH and pairing.
+        public static bool FromMac => MacScript() != null;
+
+        /// The setup script: the Mac's, appended to this exe, or the one this app carries.
+        public static string EmbeddedScript() => MacScript() ?? Resource("setup.ps1");
+
+        static readonly string[] Scripts = { "rq.py", "rqnet.py", "render_job.py", "remote_gpu.py", "progress.py" };
+
+        public static string Resource(string name)
+        {
+            using (var s = typeof(Program).Assembly.GetManifestResourceStream(name))
+            using (var r = new StreamReader(s ?? Stream.Null, Encoding.UTF8))
+                return s == null ? null : r.ReadToEnd();
+        }
+
+        /// The queue scripts this app carries, written into `dir`.
+        public static void ExtractScripts(string dir)
+        {
+            Directory.CreateDirectory(dir);
+            foreach (var name in Scripts)
+                File.WriteAllText(Path.Combine(dir, name), Resource("pc/" + name), new UTF8Encoding(false));
+        }
+
+        /// rq.py's VERSION line, 0 when there's none.
+        public static int RqVersion(string text)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(text ?? "", @"^VERSION = (\d+)", System.Text.RegularExpressions.RegexOptions.Multiline);
+            return m.Success ? int.Parse(m.Groups[1].Value) : 0;
+        }
+
+        static string MacScript()
         {
             try
             {
@@ -181,10 +214,11 @@ namespace BlenderRenderPC
     {
         readonly NotifyIcon tray = new NotifyIcon();
         readonly ToolStripMenuItem statusItem = new ToolStripMenuItem { Enabled = false };
-        readonly ToolStripMenuItem onItem = new ToolStripMenuItem("Take render jobs");
+        readonly ToolStripMenuItem onItem = new ToolStripMenuItem("Allow render jobs");
         readonly Icon onIcon, offIcon;
         readonly MainWindow window;
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 3000 };
+        readonly System.Windows.Forms.Timer updateTimer = new System.Windows.Forms.Timer { Interval = 30000 };
         readonly DateTime startedFrom = File.Exists(Paths.Installed) ? File.GetLastWriteTimeUtc(Paths.Installed) : DateTime.MinValue;
         readonly bool runningInstalled = string.Equals(Path.GetFullPath(Application.ExecutablePath), Paths.Installed, StringComparison.OrdinalIgnoreCase);
         QueueState last;
@@ -211,6 +245,12 @@ namespace BlenderRenderPC
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowWindow(); };
             timer.Tick += (s, e) => { Refresh(); CheckForUpdate(); };
             timer.Start();
+            if (runningInstalled)
+            {
+                // Newer queue scripts this copy carries, then a newer copy of the app on GitHub: now and every 6 hours.
+                updateTimer.Tick += (s, e) => { updateTimer.Interval = 6 * 3600 * 1000; Task.Run(() => SelfUpdate.Run()); };
+                updateTimer.Start();
+            }
             Refresh();
             // Not set up yet, or opened by hand: show the window. At logon (--tray) stay in the corner.
             if (showFirst || !Rq.Installed) ShowWindow();
@@ -304,6 +344,61 @@ namespace BlenderRenderPC
         }
     }
 
+    /// Keeps the queue scripts and the app itself up to date, without a Mac.
+    static class SelfUpdate
+    {
+        const string Latest = "https://api.github.com/repos/AlbertIpsen/blender-render-releases/releases/latest";
+        static string Stamp => Path.Combine(Paths.Queue, "pc_release.txt");
+
+        public static void Run()
+        {
+            try { Scripts(); } catch { }
+            try { App(); } catch { }  // offline, or GitHub busy: next time
+        }
+
+        /// This copy carries newer queue scripts than the PC has (a Mac may have sent older ones meanwhile).
+        static void Scripts()
+        {
+            if (!Rq.Installed) return;
+            int mine = Program.RqVersion(Program.Resource("pc/rq.py"));
+            if (mine <= Program.RqVersion(File.ReadAllText(Paths.RqPy))) return;
+            Program.ExtractScripts(Paths.Queue);
+            Rq.Run("restart-worker", 30000);
+        }
+
+        /// A newer BlenderRenderPC.exe in the latest release: put it in place; the running copy restarts from it.
+        static void App()
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            using (var web = new WebClient())
+            {
+                web.Headers.Add("User-Agent", "BlenderRenderPC");
+                var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(web.DownloadString(Latest));
+                var tag = Convert.ToString(release["tag_name"]);
+                if (File.Exists(Stamp) && File.ReadAllText(Stamp).Trim() == tag) return;
+                var asset = ((System.Collections.ArrayList)release["assets"]).Cast<Dictionary<string, object>>()
+                    .FirstOrDefault(a => Convert.ToString(a["name"]) == "BlenderRenderPC.exe");
+                if (asset != null)
+                {
+                    var download = Paths.Installed + ".download";
+                    web.Headers.Add("User-Agent", "BlenderRenderPC");
+                    web.DownloadFile(Convert.ToString(asset["browser_download_url"]), download);
+                    var fresh = File.ReadAllBytes(download);
+                    var current = File.Exists(Paths.Installed) ? File.ReadAllBytes(Paths.Installed) : new byte[0];
+                    // A copy from a Mac's page carries its setup script after the exe itself.
+                    bool same = current.Length >= fresh.Length && fresh.SequenceEqual(current.Take(fresh.Length));
+                    if (!same)
+                    {
+                        File.Copy(download, Paths.Installed + ".new", true);
+                        Rq.Run("install-tray", 60000);
+                    }
+                    File.Delete(download);
+                }
+                File.WriteAllText(Stamp, tag);
+            }
+        }
+    }
+
     /// Stop now (the render goes back in line) or let it finish first.
     static class StopDialog
     {
@@ -387,7 +482,7 @@ namespace BlenderRenderPC
         readonly Panel statusPanel = new Panel { Dock = DockStyle.Fill };
         readonly Panel setupPanel = new Panel { Dock = DockStyle.Fill };
         readonly Switch toggle = new Switch();
-        readonly Label toggleLabel = new Label { AutoSize = true, Text = "Take render jobs from the Mac" };
+        readonly Label toggleLabel = new Label { AutoSize = true, Text = "Allow this computer to do render jobs" };
         readonly Label headline = new Label { AutoSize = true, MaximumSize = new Size(400, 0) };
         readonly Label detail = new Label { AutoSize = true, MaximumSize = new Size(400, 0), ForeColor = SystemColors.GrayText };
         readonly ProgressBar progress = new ProgressBar { Maximum = 1000, Height = 8, Width = 400 };
@@ -482,19 +577,14 @@ namespace BlenderRenderPC
             setupAgain.Visible = script != null;
             if (!setup) return;
             if (settingUp) return;
-            if (script == null)
-            {
-                setupText.Text = "This copy can't set up a PC. On your Mac, open BlenderRender > Settings > Add PC… and "
-                               + "download BlenderRender PC from the address it shows.";
-                setupButton.Visible = false;
-            }
-            else
-            {
-                setupText.Text = "Sets this PC up to render for your Mac: turns on Windows' SSH server so the Mac can send it "
-                               + "files, lets in the Mac's key, makes the render folder C:\\GeysierRender, and pairs with the Mac.\n\n"
-                               + "Windows asks once for permission. It can take a few minutes the first time.";
-                setupButton.Visible = true;
-            }
+            setupButton.Visible = true;
+            setupText.Text = Program.FromMac
+                ? "Sets this PC up to render for your Mac: turns on Windows' SSH server so the Mac can send it "
+                  + "files, lets in the Mac's key, makes the render folder C:\\GeysierRender, and pairs with the Mac.\n\n"
+                  + "Windows asks once for permission. It can take a few minutes the first time."
+                : "Sets this PC up to render for Macs with BlenderRender on this network: makes the render folder "
+                  + "C:\\GeysierRender, starts the render queue with Windows, and lets the Macs reach it on private networks.\n\n"
+                  + "Install Blender first. Windows asks once for permission.";
         }
 
         public void Render(QueueState q)
@@ -517,8 +607,11 @@ namespace BlenderRenderPC
             Directory.CreateDirectory(dir);
             var log = Path.Combine(dir, "log.txt");
             File.Delete(log);
+            var scripts = Path.Combine(dir, "scripts");
+            Program.ExtractScripts(scripts);
             File.WriteAllText(Path.Combine(dir, "setup.ps1"),
-                "$TrayExe = '" + Application.ExecutablePath.Replace("'", "''") + "'\r\n" + script, new UTF8Encoding(true));
+                "$TrayExe = '" + Application.ExecutablePath.Replace("'", "''") + "'\r\n"
+                + "$ScriptsDir = '" + scripts.Replace("'", "''") + "'\r\n" + script, new UTF8Encoding(true));
             File.WriteAllText(Path.Combine(dir, "run.ps1"),
                 "try { & \"$PSScriptRoot\\setup.ps1\" *>&1 | ForEach-Object { \"$_\" } | Out-File -Encoding utf8 \"$PSScriptRoot\\log.txt\"; exit 0 }\r\n" +
                 "catch { \"ERROR: $($_.Exception.Message)\" | Out-File -Append -Encoding utf8 \"$PSScriptRoot\\log.txt\"; exit 1 }\r\n",
@@ -542,18 +635,26 @@ namespace BlenderRenderPC
                 setupBusy.Visible = false;
                 setupButton.Enabled = true;
                 var lines = File.Exists(log) ? File.ReadAllLines(log) : new string[0];
-                bool ok = t.Result == 0 && lines.Any(l => l.StartsWith("BR1:"));
-                bool sent = lines.Any(l => l.Contains("Sent to the Mac"));
+                bool ok = t.Result == 0 && File.Exists(Paths.RqCmd);
+                var code = lines.FirstOrDefault(l => l.StartsWith("BR1:"));
+                bool sent = code == null || lines.Any(l => l.Contains("Sent to the Mac"));
                 var notes = lines.Where(l => l.StartsWith("!!")).Select(l => l.Substring(2).Trim()).ToList();
                 if (ok)
                 {
-                    var code = lines.First(l => l.StartsWith("BR1:"));
-                    setupText.Text = sent
+                    setupText.Text = !Program.FromMac
+                        ? "Done. Macs with BlenderRender on this network now see this PC: on a Mac, open Settings and "
+                          + "click Add next to it under On This Network. BlenderRender PC starts with Windows in the taskbar corner."
+                        : sent
                         ? "Done. This PC is paired with your Mac, and BlenderRender PC now starts with Windows in the taskbar corner."
                         : "Done, but the pairing code couldn't reach the Mac. In Add PC on the Mac, paste the code below.";
                     setupResult.Text = string.Join("\r\n", (sent ? new string[0] : new[] { code, "" }).Concat(notes));
                     setupResult.Visible = !sent || notes.Count > 0;
                     StartInstalledCopy();
+                }
+                else if (lines.Any(l => l.Contains("NOT FOUND")))
+                {
+                    setupText.Text = "Blender isn't installed. Install it from blender.org in its default folder "
+                                   + "(the same version as your Macs), then click Set Up This PC again.";
                 }
                 else
                 {

@@ -171,28 +171,27 @@ struct GuideView: View {
                     step(1, "Install Blender and the NVIDIA driver", symbol: "square.and.arrow.down") {
                         Text("On the PC, install **Blender \(macBlenderVersion)** from blender.org (the same version as this Mac, so files open identically) and the latest **NVIDIA Studio or Game Ready driver**. Keep Blender's default install folder.")
                     }
-                    step(2, "Get the setup script to the PC", symbol: "doc.on.clipboard") {
-                        Text("If the PC is on the same network as this Mac, open this address in a browser on the PC and run BlenderRender PC from it; it does step 3 for you. Or type the PowerShell line in step 3 instead of pasting. Both work while this guide is open.")
+                    step(2, "On the PC: download BlenderRender PC", symbol: "arrow.down.circle") {
+                        Text("Open this address in a browser on the PC. It always gets the latest version.")
+                        code(Self.downloadURL)
+                        Text("Or, while this guide is open, the address below serves it from this Mac (the same network only).").padding(.top, 4)
                         SetupCommand()
-                        Text("Otherwise, click **Copy Script**: AnyDesk shares the clipboard with the PC, so you can paste it there in step 3. Not using AnyDesk? Choose **Save as File…** and move the file to the PC with a USB stick.").padding(.top, 4)
+                    }
+                    step(3, "Run it and click Set Up This PC", symbol: "play.circle") {
+                        Text("If the browser says the file isn't commonly downloaded, choose **Keep**. If Windows says it protected your PC, click **More info**, then **Run anyway**. Then click **Set Up This PC** and **Yes** when Windows asks; over AnyDesk that prompt may only show on the PC's own screen. BlenderRender PC then starts with Windows and keeps itself up to date.")
+                    }
+                    step(4, "Add it here", symbol: "plus.circle") {
+                        Text("The PC shows up on this Mac under **On This Network**, in Settings and in the Render PCs panel. Click **Add**. Other Macs with BlenderRender can add it too.")
+                        Button("Open Settings…") { openSettings() }.padding(.top, 4)
+                        Text("No network between the Mac and the PC? **Copy Script** and paste it into an administrator PowerShell on the PC (AnyDesk shares the clipboard), or **Save as File…**; it sets the PC up over SSH and prints a pairing code for **Add PC by Address…**.").padding(.top, 8)
                         HStack(spacing: 8) {
                             Button { copyScript() } label: {
                                 Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
                             }
-                            .buttonStyle(.borderedProminent)
                             Button("Save as File…") { saveScript() }
                         }
                         .padding(.top, 4)
                         .disabled(SetupScript.url == nil)
-                    }
-                    step(3, "On the PC: run it in PowerShell", symbol: "terminal") {
-                        Text("1. Click **Start**, type **PowerShell**, right-click **Windows PowerShell** and choose **Run as administrator**.\n2. Click **Yes** on the Windows prompt. Over AnyDesk it may only show on the PC's own screen.\n3. Type the short line, or **right-click** once inside the blue window to paste the script, then press **Return**. If the lines start with **>>**, press **Return** once more; that's PowerShell waiting for the end of the script.\n4. Wait for **== Done. Send these back:** and note the lines below it.")
-                        Text("The script turns on Windows' built-in SSH server, lets this Mac sign in with its key (no password) and installs the render queue. If you saved the file instead, run this in the folder you put it in:").padding(.top, 2)
-                        code("powershell -ExecutionPolicy Bypass -File setup_windows_pc.ps1")
-                    }
-                    step(4, "Enter the PC's details here", symbol: "gearshape") {
-                        Text("When the script finishes it prints **WIN_HOST** (the PC's address), **WIN_USER** and a **pairing code**. In Settings, choose **Add PC…** and paste the code, or type the address and user and choose **Save & Connect**. BlenderRender copies the queue scripts to the PC by itself.")
-                        Button("Open Settings…") { openSettings() }.padding(.top, 4)
                     }
                     step(5, "Keep the PC ready", symbol: "bolt.horizontal.circle", last: true) {
                         Text("Renders run while the PC is **on, awake and logged in**. In Windows Settings › System › Power, set sleep to **Never** when plugged in. In your router, give the PC a **fixed (reserved) IP address** so the address in Settings keeps working.")
@@ -213,6 +212,8 @@ struct GuideView: View {
         }
         .frame(width: 600, height: 440)
     }
+
+    static let downloadURL = "github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe"
 
     private var macBlenderVersion: String {
         // "/Applications/Blender.app/Contents/MacOS/Blender" -> read the app's version, falls back to "5.2"
@@ -256,7 +257,8 @@ struct GuideView: View {
             Text("If it shows Offline").font(.headline)
             tip("The PC is asleep, off or logged out", "Wake it and log in; the queue starts with your login.")
             tip("The address changed", "Check the PC's current IP (run `ipconfig` on the PC), update Settings, then reserve that address in the router.")
-            tip("SSH isn't running", "In PowerShell on the PC: `Get-Service sshd`. If it's stopped, run the setup script again; running it twice is safe.")
+            tip("It doesn't show up under On This Network", "Check BlenderRender PC is running on the PC (the icon in the taskbar corner) and both are on the same network. A Mac shows up once BlenderRender is open on it.")
+            tip("SSH isn't running (a PC added by address)", "In PowerShell on the PC: `Get-Service sshd`. If it's stopped, run the setup script again; running it twice is safe.")
             tip("A different network profile", "The firewall rule allows Private networks. In Windows Settings › Network, set the PC's network to Private.")
             tip("A render fails right away", "Open the job's Blender log (hover the row). A different Blender version on the PC is the usual cause.")
         }

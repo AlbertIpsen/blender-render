@@ -52,7 +52,11 @@ def config():
     cfg.setdefault("downloadDir", str(Path.home() / "Downloads/BlenderRender"))
     cfg.setdefault("macBlender", "/Applications/Blender.app/Contents/MacOS/Blender")
     if not cfg.get("testDir") and not (cfg.get("host") and cfg.get("user")):
-        raise ToolError("BlenderRender has no render PC configured. Enter it in BlenderRender's Settings.")
+        # No main PC, only computers added from the network: jobs here are This Mac's own queue; the app
+        # hands the rest out, and held/started.json says where they went.
+        if not cfg.get("extraPCs"):
+            raise ToolError("BlenderRender has no render computers yet. Add one in BlenderRender's Settings.")
+        cfg["testDir"] = str(CONFIG.parent / "thismac")
     return cfg
 
 

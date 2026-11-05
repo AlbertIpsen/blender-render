@@ -10,6 +10,11 @@ struct PCEntry: Codable, Equatable, Identifiable {
     var enabled = true
     /// Non-empty: a folder on this Mac standing in for the PC (testing without a second PC).
     var testDir = ""
+    /// Found on the network: its BlenderRender's id and port. Talked to with rqnet.py instead of SSH.
+    var nodeID: String?
+    var port: Int?
+
+    var isNetwork: Bool { (port ?? 0) > 0 }
 
     var displayName: String { name.isEmpty ? (testDir.isEmpty ? host : "Test PC") : name }
 
@@ -24,9 +29,17 @@ struct PCEntry: Codable, Equatable, Identifiable {
         name = code.name ?? ""
     }
 
-    init(id: String, name: String, host: String, user: String, queueDir: String, enabled: Bool, testDir: String) {
+    init(id: String, name: String, host: String, user: String, queueDir: String, enabled: Bool, testDir: String,
+         nodeID: String? = nil, port: Int? = nil) {
         (self.id, self.name, self.host, self.user) = (id, name, host, user)
         (self.queueDir, self.enabled, self.testDir) = (queueDir, enabled, testDir)
+        (self.nodeID, self.port) = (nodeID, port)
+    }
+
+    /// A computer heard on the network, added to the render pool.
+    init(_ n: Nearby) {
+        self.init(id: UUID().uuidString, name: n.name, host: n.host, user: "", queueDir: "", enabled: true, testDir: "",
+                  nodeID: n.id, port: n.port)
     }
 }
 
@@ -47,12 +60,16 @@ struct Config: Codable, Equatable {
     var extraPCs: [PCEntry] = []
     /// Whether the PC above helps with split animations.
     var mainPCInSplits = true
+    /// "Allow this computer to do render jobs": other BlenderRender computers may use This Mac.
+    var shareThisMac = false
+    /// Set by `config(for:)` for a PC found on the network; not saved.
+    var netPort: Int?
 
     /// The PC above and any extras, in the shape split jobs use.
     var allPCs: [PCEntry] {
         let mac = PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: true,
                           testDir: Self.thisMacDir)
-        guard isConfigured else { return extraPCs + [mac] }
+        guard hasMainPC else { return extraPCs + [mac] }
         return [PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
                         enabled: mainPCInSplits, testDir: testDir)] + extraPCs + [mac]
     }
@@ -64,10 +81,14 @@ struct Config: Codable, Equatable {
     func config(for pc: PCEntry) -> Config {
         var c = self
         (c.host, c.user, c.queueDir, c.testDir) = (pc.host, pc.user, pc.queueDir, pc.testDir)
+        c.netPort = pc.isNetwork ? pc.port : nil
         return c
     }
 
-    var isConfigured: Bool { !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) }
+    /// A main PC set up by address (SSH), or a test folder standing in for it.
+    var hasMainPC: Bool { !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) }
+    /// Somewhere to render besides This Mac: the main PC, or computers added from the network.
+    var isConfigured: Bool { hasMainPC || !extraPCs.isEmpty }
     var displayHost: String { testDir.isEmpty ? host : "this Mac (test mode)" }
 
     static var fileURL: URL {
@@ -103,6 +124,7 @@ struct Config: Codable, Equatable {
         extraPCs = try c.decodeIfPresent([PCEntry].self, forKey: .extraPCs) ?? d.extraPCs
         mainPCInSplits = try c.decodeIfPresent(Bool.self, forKey: .mainPCInSplits) ?? d.mainPCInSplits
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
+        shareThisMac = try c.decodeIfPresent(Bool.self, forKey: .shareThisMac) ?? d.shareThisMac
     }
 }
 
@@ -193,7 +215,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
 
 /// `off`: switched off for rendering on the PC itself (its tray app); jobs wait until it's back on.
 /// `paused`: Pause All on this Mac; the render in progress is frozen where it is.
-struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool?; var paused: Bool? }
+/// `share`: lets other BlenderRender computers send it jobs (always on for a PC set up from its own app).
+struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool?; var paused: Bool?; var share: Bool? }
 
 /// `rq stats`: the GPU fields are missing on a PC without nvidia-smi. VRAM is in MiB.
 struct PCStats: Decodable {
@@ -204,7 +227,8 @@ struct PCStats: Decodable {
     let vram_used: Double?
     let vram_total: Double?
 }
-struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String?; var off: Bool? }
+/// `agent`: rqnet.py is running, so other BlenderRender computers can find this queue.
+struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: String?; let host: String?; var blender_version: String?; var off: Bool?; var agent: Bool? }
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
@@ -222,6 +246,10 @@ struct RenderPC {
                     progress: (@Sendable (Int64) -> Void)? = nil) async throws -> Data {
         if !cfg.testDir.isEmpty {
             return try await Shell.run("/usr/bin/python3", [cfg.testDir + "/rq.py"] + args,
+                                       stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
+        }
+        if let port = cfg.netPort, let net = Bundle.main.resourceURL?.appendingPathComponent("pc/rqnet.py") {
+            return try await Shell.run("/usr/bin/python3", [net.path, "call", cfg.host, String(port)] + args,
                                        stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
         }
         let cmd = "\"\(cfg.queueDir)\\rq.cmd\" " + args.joined(separator: " ")
@@ -243,9 +271,23 @@ struct RenderPC {
 
     /// Connect, installing or updating the queue scripts on the PC when they're missing or outdated.
     func connect() async throws -> PCVersion {
+        if cfg.netPort != nil {  // its own BlenderRender keeps it up to date; nothing is sent to it
+            let v = try await version()
+            if v.version < Self.protocolVersion {
+                throw ShellError(message: "Its BlenderRender is older than this one. It updates itself; or update it on that computer.")
+            }
+            return v
+        }
         if let v = try? await version(), v.version == Self.protocolVersion { return v }
         try await installScripts()
         _ = try? await rq(["install-tray"])  // the Windows tray app; rendering works without it
+        if cfg.testDir.isEmpty {
+            // Other BlenderRender computers can find and use it too: open its port, share, and
+            // restart an older worker so it keeps rqnet.py running.
+            _ = try? await Shell.run("/usr/bin/ssh", sshOptions + [Self.firewallRule])
+            _ = try? await rq(["share", "on"])
+            _ = try? await rq(["restart-worker"])
+        }
         do { return try await version() } catch {
             throw ShellError(message: "The queue doesn't run on the render PC. Run setup_windows_pc.ps1 on the PC first.\n\n\(error.localizedDescription)")
         }
@@ -328,6 +370,14 @@ struct RenderPC {
     /// Let a job that's held on the PC render.
     func release(_ id: String) async throws { _ = try await rq(["release", id]) }
     func pause() async throws { _ = try await rq(["pause"]) }
+    func share(_ on: Bool) async throws { _ = try await rq(["share", on ? "on" : "off"]) }
+    func ensureWorker() async throws { _ = try await rq(["ensure-worker"]) }
+    /// Replace a worker from before rqnet.py (it never starts it); does nothing mid-render.
+    func restartWorker() async throws { _ = try await rq(["restart-worker"]) }
+
+    /// rqnet.py's port, for private networks only. SSH sessions of an admin account run elevated.
+    static let firewallRule = "netsh advfirewall firewall delete rule name=\"BlenderRender network\" >nul & "
+        + "netsh advfirewall firewall add rule name=\"BlenderRender network\" dir=in action=allow protocol=TCP localport=48211 profile=private,domain"
     func resume() async throws { _ = try await rq(["resume"]) }
 
     func log(_ id: String) async throws -> String {

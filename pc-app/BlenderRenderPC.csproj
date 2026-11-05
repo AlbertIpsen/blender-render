@@ -19,5 +19,12 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="System.Web.Extensions" />
     <EmbeddedResource Include="AppIcon.ico" LogicalName="AppIcon.ico" />
+    <!-- The queue it sets up and keeps up to date on its own, without a Mac. -->
+    <EmbeddedResource Include="../pc/rq.py" LogicalName="pc/rq.py" />
+    <EmbeddedResource Include="../pc/rqnet.py" LogicalName="pc/rqnet.py" />
+    <EmbeddedResource Include="../pc/render_job.py" LogicalName="pc/render_job.py" />
+    <EmbeddedResource Include="../remote_gpu.py" LogicalName="pc/remote_gpu.py" />
+    <EmbeddedResource Include="../progress.py" LogicalName="pc/progress.py" />
+    <EmbeddedResource Include="../setup_windows_pc.ps1" LogicalName="setup.ps1" />
   </ItemGroup>
 </Project>

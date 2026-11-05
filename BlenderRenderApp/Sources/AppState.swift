@@ -59,6 +59,9 @@ final class AppState: ObservableObject {
     /// Live detail for the Render PCs window, by PCEntry id; only kept fresh while that window is open.
     @Published var pcLive: [String: PCLive] = [:]
     private var lastPCLook = Date.distantPast
+    /// BlenderRender computers heard on the local network, this Mac aside, by name.
+    @Published private(set) var nearby: [Nearby] = []
+    private lazy var discovery = Discovery { [weak self] in self?.heard($0) }
 
     /// Jobs waiting on this Mac for Start; those being started are hidden while they upload.
     private var held: [HeldJob] = HeldJob.loadAll()
@@ -103,6 +106,7 @@ final class AppState: ObservableObject {
         Notifier.shared.setUp()
         Notifier.shared.onAction = { [weak self] id, action in self?.handleNotification(job: id, action: action) }
         startPolling()
+        discovery.start()
         splits.restore(cfg: cfg)
         refreshJobs()
         Task { [weak self] in
@@ -185,6 +189,13 @@ final class AppState: ObservableObject {
     /// Check every PC, installing or updating the queue scripts as `connect` does.
     private func checkPCs() async {
         let cfg = self.cfg
+        if let mac = cfg.allPCs.first(where: { $0.id == "mac" }) {
+            // This Mac's queue keeps rqnet.py running, so other computers can find it.
+            let rpc = RenderPC(cfg: cfg.config(for: mac))
+            let v = try? await rpc.connect()
+            try? await rpc.share(cfg.shareThisMac)
+            if v?.agent == true { try? await rpc.ensureWorker() } else { try? await rpc.restartWorker() }
+        }
         await withTaskGroup(of: (String, PCVersion?).self) { group in
             for pc in cfg.allPCs {
                 group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).connect()) }
@@ -217,7 +228,7 @@ final class AppState: ObservableObject {
                         var version = known[pc.id]
                         if version == nil { version = try await rpc.connect() }
                         let list = try await rpc.list()
-                        version?.off = list.off
+                        version?.off = Self.isOff(list, pc)
                         return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date(), off: list.off == true,
                                                       paused: list.paused == true))
                     } catch {
@@ -309,6 +320,59 @@ final class AppState: ObservableObject {
     }
 
     /// The PC holding this job.
+    // MARK: Computers on the network
+
+    /// Switched off on the PC, or (found on the network) not taking jobs from other computers.
+    nonisolated private static func isOff(_ list: PCList, _ pc: PCEntry?) -> Bool {
+        list.off == true || (pc?.isNetwork == true && list.share == false)
+    }
+
+    private var ownNodeID: String? {
+        (try? String(contentsOfFile: Config.thisMacDir + "/node_id", encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func heard(_ n: Nearby) {
+        guard n.id != ownNodeID else { return }
+        if let i = nearby.firstIndex(where: { $0.id == n.id }) { nearby[i] = n } else {
+            nearby.append(n)
+            nearby.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        // Its address changed (DHCP): keep the pool entry pointing at it.
+        if let i = cfg.extraPCs.firstIndex(where: { $0.nodeID == n.id }),
+           cfg.extraPCs[i].host != n.host || cfg.extraPCs[i].port != n.port {
+            var c = cfg
+            (c.extraPCs[i].host, c.extraPCs[i].port) = (n.host, n.port)
+            saveConfig(c)
+        }
+    }
+
+    /// The pool entry for a computer on the network: added from it, or the same address set up by SSH.
+    func poolEntry(_ n: Nearby) -> PCEntry? {
+        cfg.allPCs.first { $0.nodeID == n.id || (!$0.isNetwork && !n.host.isEmpty && $0.host == n.host) }
+    }
+
+    var nearbyToAdd: [Nearby] { nearby.filter { poolEntry($0) == nil } }
+
+    func addToPool(_ n: Nearby) {
+        guard poolEntry(n) == nil else { return }
+        var c = cfg
+        c.extraPCs.append(PCEntry(n))
+        saveConfig(c)
+    }
+
+    /// "Allow this computer to do render jobs" on This Mac.
+    func setShareThisMac(_ on: Bool) {
+        cfg.shareThisMac = on
+        cfg.save()
+        guard let mac = cfg.allPCs.first(where: { $0.id == "mac" }) else { return }
+        let rpc = RenderPC(cfg: cfg.config(for: mac))
+        Task {
+            try? await rpc.share(on)
+            try? await rpc.ensureWorker()
+        }
+    }
+
     // MARK: Pause All
 
     /// Every PC freezes its render where it is and starts nothing new, until Resume All. Kept across
@@ -379,19 +443,23 @@ final class AppState: ObservableObject {
         guard cfg.allPCs == self.cfg.allPCs else { return }  // settings changed meanwhile
         for (id, list) in results {
             guard let list else { continue }
-            pcVersions[id]?.off = list.off
+            pcVersions[id]?.off = Self.isOff(list, cfg.allPCs.first { $0.id == id })
             syncPause(id, reported: list.paused == true)
             let jobs = list.jobs
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
         }
         for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) && id != "main" { jobsByPC[id] = nil }
+        nearby.removeAll { Date().timeIntervalSince($0.seen) > 20 }  // gone quiet: switched off or left
         refreshJobs()
     }
 
     /// One refresh; returns seconds until the next one.
     private func poll() async -> Double {
         defer { updateKeepAwake() }
-        guard cfg.isConfigured else { status = .notConfigured; return 2 }
+        guard cfg.hasMainPC else {  // only computers from the network: each is checked in pollOtherPCs
+            status = cfg.isConfigured ? .online(host: "Your render pool", gpu: "", worker: true) : .notConfigured
+            return 2
+        }
         let pc = self.pc
         do {
             if !connected {
