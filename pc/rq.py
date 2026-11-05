@@ -58,7 +58,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 11
+VERSION = 12
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"

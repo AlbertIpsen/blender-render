@@ -205,7 +205,7 @@ struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: Strin
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 11
+    static let protocolVersion = 12
     let cfg: Config
 
     private var sshOptions: [String] {
