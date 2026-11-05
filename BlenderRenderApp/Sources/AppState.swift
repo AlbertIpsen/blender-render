@@ -342,7 +342,8 @@ final class AppState: ObservableObject {
     }
 
     private func heard(_ n: Nearby) {
-        guard n.id != ownNodeID else { return }
+        // This Mac itself, or another queue running on it (a test): This Mac is already on the list.
+        guard n.id != ownNodeID, !Discovery.ownAddresses().contains(n.host) else { return }
         if let i = nearby.firstIndex(where: { $0.id == n.id }) { nearby[i] = n } else {
             nearby.append(n)
             nearby.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }

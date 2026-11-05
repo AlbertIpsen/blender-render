@@ -486,19 +486,17 @@ struct JobRow: View {
         let blender = isHeld ? state.heldBlender(job) : state.splitBlender(job)
         let offered = isHeld ? state.singlePCs() + state.cfg.allPCs.filter { ids.contains($0.id) && !state.singlePCs().contains($0) }
                              : state.cfg.allPCs.filter { ids.contains($0.id) || state.canShare($0, blender: blender) }
-        let switches = ForEach(offered) { pc in
-            HStack(spacing: 6) {
-                Toggle(state.pcName(pc), isOn: Binding(get: { ids.contains(pc.id) },
-                                                       set: { isHeld ? state.setHeldPC(job, pc, on: $0) : state.setSplitPC(job, pc, on: $0) }))
-                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
-                    .disabled(ids == [pc.id])  // at least one
-                Text(state.pcName(pc)) + Text(pcNote(pc, blender: blender, isHeld: isHeld)).foregroundColor(.secondary)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(offered) { pc in
+                HStack(spacing: 6) {
+                    Toggle(state.pcName(pc), isOn: Binding(get: { ids.contains(pc.id) },
+                                                           set: { isHeld ? state.setHeldPC(job, pc, on: $0) : state.setSplitPC(job, pc, on: $0) }))
+                        .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                        .disabled(ids == [pc.id])  // at least one
+                    Text(state.pcName(pc)) + Text(pcNote(pc, blender: blender, isHeld: isHeld)).foregroundColor(.secondary)
+                }
+                .help(ids == [pc.id] ? "A job needs at least one PC." : "Render this job on \(state.pcName(pc)).")
             }
-            .help(ids == [pc.id] ? "A job needs at least one PC." : "Render this job on \(state.pcName(pc)).")
-        }
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: 18) { switches }
-            VStack(alignment: .leading, spacing: 6) { switches }
         }
         .font(.callout)
     }

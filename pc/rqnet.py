@@ -29,7 +29,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 HERE = Path(__file__).resolve().parent
 WIN = os.name == "nt"
 PORT = 48211
@@ -138,6 +138,16 @@ def node_id():
         return nid
 
 
+def rq_version():
+    """rq.py's VERSION as it is on disk now: the app may have updated it since this started."""
+    import re
+    try:
+        m = re.search(r"^VERSION = (\d+)", (HERE / "rq.py").read_text(encoding="utf-8"), re.M)
+        return int(m.group(1)) if m else 0
+    except OSError:
+        return 0
+
+
 def beacon(port):
     """Say who this is, every 5 s, to everyone on the local network."""
     sys.path.insert(0, str(HERE))
@@ -153,7 +163,7 @@ def beacon(port):
             msg = {"br": 1, "id": nid, "name": computer_name(), "kind": "pc" if WIN else "mac", "port": port,
                    "allow": allowed(), "off": rq.OFF.exists(), "paused": rq.PAUSED.exists(),
                    "rendering": rendering, "gpu": state.get("gpu", ""), "blender": rq.blender_version(),
-                   "version": rq.VERSION, "net": VERSION}
+                   "version": rq_version(), "net": VERSION}
             data = json.dumps(msg).encode()
             for addr in ("255.255.255.255", "<broadcast>"):
                 try:

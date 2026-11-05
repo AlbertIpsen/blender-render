@@ -63,6 +63,27 @@ final class Discovery: @unchecked Sendable {
         }
     }
 
+    /// This Mac's IPv4 addresses.
+    static func ownAddresses() -> Set<String> {
+        var found: Set<String> = ["127.0.0.1"]
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0 else { return found }
+        defer { freeifaddrs(list) }
+        var p = list
+        while let i = p {
+            if let a = i.pointee.ifa_addr, a.pointee.sa_family == sa_family_t(AF_INET) {
+                var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                a.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { s in
+                    var addr = s.pointee.sin_addr
+                    _ = inet_ntop(AF_INET, &addr, &text, socklen_t(INET_ADDRSTRLEN))
+                }
+                found.insert(String(cString: text))
+            }
+            p = i.pointee.ifa_next
+        }
+        return found
+    }
+
     private static func parse(_ data: Data, from: sockaddr_in) -> Nearby? {
         struct Beacon: Decodable {
             let br: Int; let id: String; let name: String; let kind: String; let port: Int; let allow: Bool
