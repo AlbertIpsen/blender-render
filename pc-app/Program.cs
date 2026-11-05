@@ -54,11 +54,39 @@ namespace BlenderRenderPC
                 showSignal.Set();  // already running: bring its window forward instead
                 return;
             }
+            if (HandOver())
+            {
+                single.ReleaseMutex();
+                return;
+            }
             var app = new TrayApp(showFirst: !args.Contains("--tray"));
             new Thread(() => { while (showSignal.WaitOne()) app.ShowWindowFromAnyThread(); }) { IsBackground = true }.Start();
             Application.Run(app);
             single.ReleaseMutex();
         }
+
+        /// Started from Downloads (say) on a PC that's already set up: the copy in the queue folder is the
+        /// one that starts at logon and updates itself, so put this one there if it's newer, then switch to it.
+        static bool HandOver()
+        {
+            var me = Path.GetFullPath(Application.ExecutablePath);
+            if (string.Equals(me, Paths.Installed, StringComparison.OrdinalIgnoreCase) || !Rq.Installed || !File.Exists(Paths.Installed))
+                return false;
+            try
+            {
+                if (ParseVersion(Version) > ParseVersion(FileVersionInfo.GetVersionInfo(Paths.Installed).ProductVersion))
+                {
+                    File.Copy(me, Paths.Installed + ".new", true);
+                    Rq.Run("install-tray", 60000);
+                }
+                Process.Start(Paths.Installed, "--restarted");
+                return true;
+            }
+            catch { return false; }  // carry on as this copy
+        }
+
+        static System.Version ParseVersion(string v) =>
+            System.Version.TryParse((v ?? "").Split('+')[0], out var parsed) ? parsed : new System.Version(0, 0);
 
         /// "1.5.2", stamped in by pc-app/build.sh from the repo's VERSION.
         public static string Version =>
