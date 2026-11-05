@@ -11,6 +11,11 @@ Drop a `.blend` on a Mac, render it on the other computers on your network (Wind
 
 ## Install
 
+**Downloads** (always the latest version):
+
+- Mac: [BlenderRender.zip](https://github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRender.zip)
+- Windows PC: [BlenderRenderPC.exe](https://github.com/AlbertIpsen/blender-render-releases/releases/latest/download/BlenderRenderPC.exe)
+
 Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and updated from the public [blender-render-releases](https://github.com/AlbertIpsen/blender-render-releases) repo, which holds only the downloads, so no GitHub account is needed. The first time it looks for other computers, macOS asks to allow BlenderRender on the local network: choose **Allow**.
 
 ## Set up a Windows render PC
