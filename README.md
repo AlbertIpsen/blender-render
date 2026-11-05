@@ -13,6 +13,50 @@ Drop a `.blend` on a Mac, render it on a Windows PC with an NVIDIA GPU, and get 
 
 Needs macOS 14+ and Blender in `/Applications`. The app is downloaded and updated from the public [blender-render-releases](https://github.com/AlbertIpsen/blender-render-releases) repo, which holds only the zip, so no GitHub account is needed.
 
+## Set up a Windows render PC
+
+About 10 minutes, once per PC. You need to be at the PC, or connected to it with AnyDesk. The same steps are in the app under Help > Set Up a Render PC.
+
+**Before you start, on the PC**
+
+1. Install the same Blender version as the Mac (major.minor, e.g. 5.2) from blender.org, in its default folder. A Steam install works too.
+2. Install the latest NVIDIA Studio or Game Ready driver.
+3. Connect the PC to the same network as the Mac, with Ethernet if you can: frames come back much faster than over Wi-Fi.
+
+**1. Open Add PC on the Mac.** In BlenderRender, open Settings and choose **Add PC…**. While that window is open, the Mac shows an address like `192.168.1.20/4821`.
+
+**2. Run BlenderRender PC on the PC.** Open that address in a browser on the PC and download **BlenderRender PC**.
+
+- If the browser says the file isn't commonly downloaded, choose **Keep**.
+- If Windows says it protected your PC, click **More info**, then **Run anyway**. The app isn't signed by a publisher Windows knows.
+- Click **Set Up This PC** and choose **Yes** when Windows asks for permission. Over AnyDesk, that prompt may only show on the PC's own screen.
+- The first run can take a few minutes while Windows adds its SSH server.
+
+When it's done, the PC appears in the Mac's Render PCs list by itself, and the Mac copies the render queue over the first time it connects.
+
+**Prefer PowerShell?** Start PowerShell as administrator (Start > type PowerShell > right-click > **Run as administrator**) and type the line Add PC shows, e.g. `iex (irm 192.168.1.20/4821)`. If the PC isn't on the same network, choose **Copy Script** (AnyDesk shares the clipboard) or **Save as File…** in Help > Set Up a Render PC. Paste the script into the administrator PowerShell, or run the saved file with `powershell -ExecutionPolicy Bypass -File setup_windows_pc.ps1`. At the end it prints a line starting with `BR1:`. If it couldn't send that line to the Mac, paste it into Add PC.
+
+**3. Keep the PC ready.** Renders run only while the PC is on, awake and logged in.
+
+- In Windows Settings > System > Power, set sleep to **Never** when plugged in.
+- In your router, give the PC a fixed (reserved) IP address, so the address the Mac saved keeps working.
+- BlenderRender PC sits in the taskbar corner and starts at logon. Its switch stops the PC taking render jobs, for example while you play a game on it.
+
+**What setup changes on the PC**
+
+- Turns on Windows' OpenSSH server and opens port 22 for private networks only.
+- Lets the Mac sign in with its SSH key, so no password is stored anywhere.
+- Creates `C:\GeysierRender` (render files, plus the queue in `C:\GeysierRender\queue`).
+- Adds two scheduled tasks that start at logon: `BlenderRenderQueue` (renders the jobs) and `BlenderRenderPC` (the taskbar app).
+
+**If the Mac can't connect**
+
+- **Network set to Public:** the firewall rule only covers private networks, and setup warns about this at the end. Fix it in Settings > Network & internet > your connection > Properties > **Private network**.
+- **Address changed:** the PC got a new IP address. Reserve one in the router, then update the address in Settings on the Mac.
+- **PC asleep or logged out:** wake it and log in. The queue only runs in a logged-in session.
+- **Blender not found:** setup prints `WIN_BLENDER=NOT FOUND`. Install Blender in its default folder and run setup again (**Set up again…** in BlenderRender PC).
+- **Different Blender version:** a PC with another major.minor version than the Mac is left out of split jobs. Install the matching version.
+
 ## The queue
 
 Every job waits under Waiting to Start until you press Start: one added in the app, one from Claude (the connector asks the app to hold it, `Held.swift`), and one sent straight to a PC (`rq receive` holds it there unless the options say `start_now`). While it waits, its PCs menu chooses who renders it: one PC renders the whole job and doesn't need this Mac; two or more split an animation. This Mac is always on the list: it runs the same `rq.py` in `~/Library/Application Support/BlenderRender/thismac` with its own Blender on Metal. Every cancel and remove is written to `cancel.log`, in that folder and on the PC, with what asked for it.
