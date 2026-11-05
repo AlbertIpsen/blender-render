@@ -66,7 +66,6 @@ final class AppState: ObservableObject {
     /// Jobs waiting on this Mac for Start; those being started are hidden while they upload.
     private var held: [HeldJob] = HeldJob.loadAll()
     private var starting: Set<String> = []
-    private var connected = false
     /// Last list from each PC, by PCEntry id; an unreachable PC keeps what it last reported.
     private var jobsByPC: [String: [PCJob]] = [:]
     private var pcJobs: [PCJob] { cfg.allPCs.flatMap { jobsByPC[$0.id] ?? [] } }
@@ -77,7 +76,8 @@ final class AppState: ObservableObject {
     /// Held while the Mac must not idle to sleep; ending it hands sleep back to macOS.
     private var awakeActivity: NSObjectProtocol?
 
-    var pc: RenderPC { RenderPC(cfg: cfg) }
+    /// When each computer last answered, by PCEntry id; the toolbar status counts those heard from lately.
+    private var pcSeen: [String: Date] = [:]
     var rendering: [PCJob] { jobs.filter { $0.state == "rendering" } }
     /// Added, waiting for PCs to be chosen and Start: held on this Mac, or held on a PC (sent there directly).
     var waitingToStart: [PCJob] { jobs.filter { $0.state == "held" } }
@@ -180,7 +180,6 @@ final class AppState: ObservableObject {
     func saveConfig(_ new: Config) {
         cfg = new
         cfg.save()
-        connected = false
         jobsByPC = [:]
         refreshJobs()
         startPolling()
@@ -282,7 +281,7 @@ final class AppState: ObservableObject {
         var picked = (UserDefaults.standard.stringArray(forKey: Self.lastPCsKey) ?? []).filter(available.contains)
         if picked.isEmpty { picked = available.filter { $0 != "mac" } }
         if picked.isEmpty { picked = available }
-        return animation ? picked : [picked.first ?? "main"]
+        return animation ? picked : [picked.first ?? "mac"]
     }
 
     private static let lastPCsKey = "lastPCs"
@@ -312,7 +311,7 @@ final class AppState: ObservableObject {
 
     /// PCs a whole job can go to: the main one, and any other that's answering.
     func singlePCs() -> [PCEntry] {
-        cfg.allPCs.filter { $0.id == "main" || pcVersions[$0.id] != nil }
+        cfg.allPCs.filter { pcVersions[$0.id] != nil }
     }
 
     /// The PC's own name, or its Windows computer name when none was given.
@@ -347,6 +346,16 @@ final class AppState: ObservableObject {
         if let i = nearby.firstIndex(where: { $0.id == n.id }) { nearby[i] = n } else {
             nearby.append(n)
             nearby.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        // A PC set up by address (SSH): talk to it over the network instead, once it runs the scripts this
+        // app would give it (until then SSH is how it gets them).
+        if n.version >= RenderPC.protocolVersion,
+           let i = cfg.extraPCs.firstIndex(where: { $0.nodeID == nil && $0.testDir.isEmpty && $0.host == n.host }) {
+            var c = cfg
+            (c.extraPCs[i].nodeID, c.extraPCs[i].port) = (n.id, n.port)
+            if c.extraPCs[i].name.isEmpty { c.extraPCs[i].name = n.name }
+            saveConfig(c)
+            return
         }
         // Its address changed (DHCP): keep the pool entry pointing at it.
         if let i = cfg.extraPCs.firstIndex(where: { $0.nodeID == n.id }),
@@ -420,7 +429,7 @@ final class AppState: ObservableObject {
     }
 
     private func rpc(for job: PCJob) -> RenderPC {
-        guard let id = job.pc, id != "main", let pc = cfg.allPCs.first(where: { $0.id == id }) else { return pc }
+        let pc = cfg.allPCs.first { $0.id == job.pc } ?? cfg.allPCs[cfg.allPCs.count - 1]  // This Mac
         return RenderPC(cfg: cfg.config(for: pc))
     }
 
@@ -449,11 +458,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Jobs sent whole to a PC other than the main one. Separate from `poll`, so a PC that's
-    /// switched off doesn't slow the main queue down.
+    /// Every computer's jobs, all at once, so one that's off or slow doesn't hold the others up.
     private func pollOtherPCs() async {
         let cfg = self.cfg
-        let others = cfg.allPCs.filter { $0.id != "main" }
+        let others = cfg.allPCs
         let results = await withTaskGroup(of: (String, PCList?).self) { group in
             for pc in others {
                 group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).list()) }
@@ -463,57 +471,43 @@ final class AppState: ObservableObject {
         guard cfg.allPCs == self.cfg.allPCs else { return }  // settings changed meanwhile
         for (id, list) in results {
             guard let list else { continue }
+            pcSeen[id] = Date()
             pcVersions[id]?.off = Self.isOff(list, cfg.allPCs.first { $0.id == id })
             keepWorker(id, list)
             syncPause(id, reported: list.paused == true)
             let jobs = list.jobs
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
         }
-        for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) && id != "main" { jobsByPC[id] = nil }
+        for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) { jobsByPC[id] = nil }
         nearby.removeAll { Date().timeIntervalSince($0.seen) > 20 }  // gone quiet: switched off or left
         refreshJobs()
     }
 
-    /// One refresh; returns seconds until the next one.
+    /// The toolbar status, from what the computers last answered; returns seconds until the next look.
     private func poll() async -> Double {
         defer { updateKeepAwake() }
-        guard cfg.hasMainPC else {  // only computers from the network: each is checked in pollOtherPCs
-            status = cfg.isConfigured ? .online(host: "Your render pool", gpu: "", worker: true) : .notConfigured
-            return 2
+        // Downloads made outside the app (the Claude connector) are recorded in the same defaults key.
+        for (id, path) in UserDefaults.standard.dictionary(forKey: "downloaded") as? [String: String] ?? [:]
+        where downloaded[id] == nil {
+            downloaded[id] = path
         }
-        let pc = self.pc
-        do {
-            if !connected {
-                if case .online = status {} else { status = .connecting }
-                let v = try await pc.connect()
-                connected = true
-                status = .online(host: v.host ?? cfg.displayHost, gpu: v.gpu ?? "", worker: v.worker)
-            }
-            let list = try await pc.list()
-            // Downloads made outside the app (the Claude connector) are recorded in the same defaults key.
-            for (id, path) in UserDefaults.standard.dictionary(forKey: "downloaded") as? [String: String] ?? [:]
-            where downloaded[id] == nil {
-                downloaded[id] = path
-            }
-            pcVersions["main"]?.off = list.off
-            syncPause("main", reported: list.paused == true)
-            keepWorker("main", list)
-            jobsByPC["main"] = list.jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = "main"; return j }  // batches show as their split job
-            refreshJobs()
-            if case .online(let host, let gpu, _) = status {
-                status = .online(host: host, gpu: list.gpu?.isEmpty == false ? list.gpu! : gpu, worker: list.worker)
-            }
-            return 2
-        } catch {
-            connected = false
-            status = .offline(error.localizedDescription)
-            return 5
+        let pool = cfg.extraPCs
+        guard !pool.isEmpty else { status = .notConfigured; return 2 }
+        let answering = pool.filter { Date().timeIntervalSince(pcSeen[$0.id] ?? .distantPast) < 15 }
+        let gpus = answering.compactMap { pcVersions[$0.id]?.gpu }.filter { !$0.isEmpty }
+        if answering.isEmpty {
+            status = pcSeen.isEmpty ? .connecting : .offline("None of your render computers answer.")
+        } else {
+            status = .online(host: answering.count == pool.count ? "\(pool.count) render computer\(pool.count == 1 ? "" : "s") ready"
+                                                                 : "\(answering.count) of \(pool.count) render computers ready",
+                             gpu: gpus.count == 1 ? gpus[0] : "", worker: true)
         }
+        return 2
     }
 
     /// A PC that's offline can't report its jobs finishing, so it doesn't hold the Mac awake.
     private func updateKeepAwake() {
-        let busy = !uploads.isEmpty || !downloads.isEmpty || splits.isActive || (connected && pcJobs.contains(where: \.isActive))
+        let busy = !uploads.isEmpty || !downloads.isEmpty || splits.isActive || pcJobs.contains(where: \.isActive)
         if cfg.keepAwake && busy {
             guard awakeActivity == nil else { return }
             awakeActivity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled,
@@ -525,8 +519,8 @@ final class AppState: ObservableObject {
     }
 
     func reconnect() {
-        connected = false
         startPolling()
+        Task { await checkPCs() }
     }
 
     func refreshSoon() { Task { _ = await poll(); await pollOtherPCs() } }
@@ -544,7 +538,7 @@ final class AppState: ObservableObject {
                 }
             case "done":
                 if cfg.autoDownload && (job.files ?? 0) > 0 && downloaded[job.id] == nil { download(job, reveal: false) }
-                let pc = rpc(for: job), gpu = job.pc == "main" || job.pc == nil ? currentGPU : pcVersions[job.pc!]?.gpu ?? ""
+                let pc = rpc(for: job), gpu = job.pc.flatMap { pcVersions[$0]?.gpu } ?? ""
                 Task {
                     let preview = await pc.previewThumbnail(job.id)
                     Notifier.shared.renderDone(job, gpu: gpu, preview: preview)
@@ -557,11 +551,6 @@ final class AppState: ObservableObject {
     }
 
     private func jobPCCount(_ job: PCJob) -> Int { splits.run(job.id)?.state.pcs.count ?? 1 }
-
-    private var currentGPU: String {
-        if case .online(_, let gpu, _) = status { return gpu }
-        return ""
-    }
 
     // MARK: adding files
 

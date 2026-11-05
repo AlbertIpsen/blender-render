@@ -103,7 +103,6 @@ struct GuideView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openSettings) private var openSettings
-    @StateObject private var copied = Box(false)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -134,15 +133,6 @@ struct GuideView: View {
                     step(4, "Add it here", symbol: "plus.circle") {
                         Text("The PC shows up on this Mac under **On This Network**, in Settings and in the Render PCs panel. Click **Add**. Other Macs with BlenderRender can add it too.")
                         Button("Open Settings…") { openSettings() }.padding(.top, 4)
-                        Text("No network between the Mac and the PC? **Copy Script** and paste it into an administrator PowerShell on the PC (AnyDesk shares the clipboard), or **Save as File…**; it sets the PC up over SSH and prints a pairing code under **Main PC** in Settings › Advanced.").padding(.top, 8)
-                        HStack(spacing: 8) {
-                            Button { copyScript() } label: {
-                                Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
-                            }
-                            Button("Save as File…") { saveScript() }
-                        }
-                        .padding(.top, 4)
-                        .disabled(SetupScript.url == nil)
                     }
                     step(5, "Keep the PC ready", symbol: "bolt.horizontal.circle", last: true) {
                         Text("Renders run while the PC is **on, awake and logged in**. In Windows Settings › System › Power, set sleep to **Never** when plugged in. In your router, give the PC a **fixed (reserved) IP address** so the address in Settings keeps working.")
@@ -223,25 +213,6 @@ struct GuideView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(problem).font(.callout.weight(.medium))
             Text(.init(fix)).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func copyScript() {
-        guard let text = SetupScript.withKey() else { state.alert = SetupScript.keyProblem; return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        withAnimation(.ui) { copied.value = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { withAnimation(.ui) { copied.value = false } }
-    }
-
-    private func saveScript() {
-        guard let text = SetupScript.withKey() else { state.alert = SetupScript.keyProblem; return }
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "setup_windows_pc.ps1"
-        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-        if panel.runModal() == .OK, let dst = panel.url {
-            try? text.write(to: dst, atomically: true, encoding: .utf8)
-            NSWorkspace.shared.activateFileViewerSelecting([dst])
         }
     }
 }

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""BlenderRender connector for Claude: an MCP server (stdio) that queues .blend files on the render PC.
+"""BlenderRender connector for Claude: an MCP server (stdio) that queues .blend files on the render computers.
 
 Jobs go to the BlenderRender Mac app (a folder in its inbox per request), where they wait in "Waiting to
-Start" (job ids starting "held-") until Albert picks the PCs and presses Start; then they become a
-split job ("split-", the same id) or a job on one PC. Without the app, a job goes straight into the
-main PC's queue (remote/pc/rq.py) and is held there until Start in the app. Uses the app's own settings (~/Library/Application Support/BlenderRender/config.json),
-packs textures with the Mac's Blender exactly like the app, and downloads into the app's folder.
+Start" (job ids starting "held-") until Albert picks the computers and presses Start; then they become
+a split job ("split-", the same id) or a job on one computer. Without the app, a job goes straight into
+the first render computer's queue (remote/pc/rq.py) and is held there until Start in the app. Uses the
+app's own list of computers (~/Library/Application Support/BlenderRender/config.json), reaching each as
+the app does (rqnet.py over the network, SSH, or This Mac's own queue), packs textures with the Mac's
+Blender exactly like the app, and downloads into the app's folder.
 
 Standard library only (macOS's Python 3.9). Register with Claude Code:
   claude mcp add --scope user blenderrender -- python3 /path/to/blenderrender_mcp.py
@@ -42,42 +44,69 @@ class ToolError(Exception):
 
 # --- talking to the render PC ---------------------------------------------------------------------
 
+RQNET = next((p for p in (HERE.parent / "pc/rqnet.py", APP / "Contents/Resources/pc/rqnet.py") if p.exists()), None)
+
+
 def config():
+    """The app's settings, with `pcs`: one rq config per render computer, then This Mac."""
     try:
         cfg = json.loads(CONFIG.read_text())
     except (OSError, ValueError):
-        raise ToolError("BlenderRender isn't set up on this Mac yet. Open the BlenderRender app and "
-                        "follow Help > Set Up a Render PC.")
-    cfg.setdefault("queueDir", r"C:\GeysierRender\queue")
+        raise ToolError("BlenderRender isn't set up on this Mac yet. Open the BlenderRender app.")
     cfg.setdefault("downloadDir", str(Path.home() / "Downloads/BlenderRender"))
     cfg.setdefault("macBlender", "/Applications/Blender.app/Contents/MacOS/Blender")
-    if not cfg.get("testDir") and not (cfg.get("host") and cfg.get("user")):
-        # No main PC, only computers added from the network: jobs here are This Mac's own queue; the app
-        # hands the rest out, and held/started.json says where they went.
-        if not cfg.get("extraPCs"):
-            raise ToolError("BlenderRender has no render computers yet. Add one in BlenderRender's Settings.")
-        cfg["testDir"] = str(CONFIG.parent / "thismac")
+    entries = list(cfg.get("extraPCs") or [])
+    if cfg.get("testDir") or (cfg.get("host") and cfg.get("user")):  # settings from before the app moved it into the list
+        entries.insert(0, {"id": "main", "host": cfg.get("host", ""), "user": cfg.get("user", ""),
+                           "queueDir": cfg.get("queueDir", ""), "testDir": cfg.get("testDir", "")})
+    entries.append({"id": "mac", "name": "This Mac", "testDir": str(CONFIG.parent / "thismac")})
+    cfg["pcs"] = [{"id": e["id"], "name": e.get("name") or e.get("host") or e["id"], "host": e.get("host", ""),
+                   "user": e.get("user", ""), "queueDir": e.get("queueDir") or r"C:\GeysierRender\queue",
+                   "testDir": e.get("testDir", ""), "port": e.get("port")} for e in entries]
     return cfg
 
 
-def rq(cfg, *args, stdin=None, stdout=None, timeout=120):
-    """Run rq.py on the PC (or in the local test folder) and return stdout bytes."""
-    if cfg.get("testDir"):
-        cmd = [sys.executable, os.path.join(cfg["testDir"], "rq.py"), *args]
+def mac_name():
+    try:
+        return subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
+
+
+def rq(pc, *args, stdin=None, stdout=None, timeout=120):
+    """Run rq.py on one computer (an entry of config()["pcs"]) and return stdout bytes."""
+    env = dict(os.environ, BR_FROM=mac_name())  # BlenderRender PC shows who's connected
+    if pc.get("testDir"):
+        cmd = [sys.executable, os.path.join(pc["testDir"], "rq.py"), *args]
+    elif pc.get("port") and RQNET:
+        cmd = [sys.executable, str(RQNET), "call", pc["host"], str(pc["port"]), *args]
     else:
+        b64 = base64.b64encode(env["BR_FROM"].encode()).decode()
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=15",
                "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/blenderrender-mcp-%C", "-o", "ControlPersist=120",
-               "%s@%s" % (cfg["user"], cfg["host"]),
-               '"%s\\rq.cmd" %s' % (cfg["queueDir"], " ".join(args))]
+               "%s@%s" % (pc["user"], pc["host"]),
+               'set BR_FROM_B64=%s&& "%s\\rq.cmd" %s' % (b64, pc["queueDir"], " ".join(args))]
     try:
         p = subprocess.run(cmd, stdin=stdin or subprocess.DEVNULL, stdout=stdout or subprocess.PIPE,
-                           stderr=subprocess.PIPE, timeout=timeout)
+                           stderr=subprocess.PIPE, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
-        raise ToolError("The render PC didn't answer in time. Is it on, awake and logged in?")
+        raise ToolError("%s didn't answer in time. Is it on, awake and logged in?" % pc["name"])
     if p.returncode != 0:
         err = p.stderr.decode(errors="replace").strip()
-        raise ToolError("Render PC error: %s" % (err or "exit code %d" % p.returncode))
+        raise ToolError("%s: %s" % (pc["name"], err or "exit code %d" % p.returncode))
     return p.stdout if stdout is None else b""
+
+
+def answering(cfg, *args, timeout=20):
+    """(computer, rq reply) for every computer that answers `rq <args>`, asked all at once."""
+    from concurrent.futures import ThreadPoolExecutor
+    def ask(pc):
+        try:
+            return pc, rq_json(pc, *args, timeout=timeout)
+        except ToolError:
+            return pc, None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return [(pc, r) for pc, r in pool.map(ask, cfg["pcs"]) if r is not None]
 
 
 def rq_json(cfg, *args, **kw):
@@ -107,7 +136,7 @@ def duration(secs):
 
 def describe(job, position=None):
     """One job as a dict of plain facts, with the time left counted down to now."""
-    out = {"id": job["id"], "name": job.get("name"), "state": job.get("state"),
+    out = {"id": job["id"], "name": job.get("name"), "state": job.get("state"), "on": job.get("on"),
            "mode": job.get("mode"), "resolution_percent": job.get("pct"), "samples": job.get("samples")}
     if job.get("split_across"):
         out["split_across"] = job["split_across"]
@@ -191,10 +220,9 @@ def held_jobs():
 
 def config_pcs():
     try:
-        cfg = json.loads(CONFIG.read_text())
-    except (OSError, ValueError):
+        return config()["pcs"]
+    except ToolError:
         return []
-    return [{"id": "main", "name": "render PC", "host": cfg.get("host")}] + (cfg.get("extraPCs") or []) + [{"id": "mac", "name": "This Mac"}]
 
 
 def find_held(cfg, job_id):
@@ -210,11 +238,7 @@ def find_held(cfg, job_id):
         raise ToolError("No job %s waiting in the BlenderRender app." % job_id)
     if started["job"].startswith("split-"):
         return find_split(started["job"])
-    if started.get("pc") in ("", "main"):
-        return find_job(cfg, started["job"])
-    names = {p.get("id"): p.get("name") or p.get("host") for p in config_pcs()}
-    return {"id": started["job"], "state": "started", "name": job_id,
-            "note": "Started on %s as job %s; follow it in the BlenderRender app." % (names.get(started["pc"], started["pc"]), started["job"])}
+    return find_job(cfg, started["job"])
 
 
 def find_split(job_id):
@@ -295,15 +319,17 @@ def pack_and_inspect(cfg, blend):
 
 
 def tool_status(cfg, _args):
-    v = rq_json(cfg, "version")
-    lst = rq_json(cfg, "list")
-    jobs = [j for j in lst["jobs"] if not j.get("parent")]  # batches of a split job belong to the Mac app
+    lists = answering(cfg, "list")
+    jobs = []
+    for pc, lst in lists:  # batches of a split job belong to the Mac app
+        jobs += [dict(j, on=pc["name"]) for j in lst["jobs"] if not j.get("parent")]
     jobs += split_jobs()
     queued = [j for j in jobs if j.get("state") == "queued"]
     waiting = held_jobs() + [j for j in jobs if j.get("state") == "held"]
+    heard = {pc["id"] for pc, _ in lists}
     return {
         "waiting_to_start": [describe(j) for j in waiting],
-        "render_pc": v.get("host"), "gpu": pretty_gpu(v.get("gpu") or ""), "queue_worker_running": lst.get("worker"),
+        "computers": [{"name": pc["name"], "answering": pc["id"] in heard} for pc in cfg["pcs"]],
         "rendering": [describe(j) for j in jobs if j.get("state") == "rendering"],
         "up_next": [describe(j, i + 1) for i, j in enumerate(queued)],
         "finished": [describe(j) for j in sorted((j for j in jobs if j.get("state") in ("done", "failed", "cancelled")),
@@ -357,10 +383,10 @@ def tool_queue(cfg, args):
         split = ask_app(request, blend=packed)  # waits in the app for Albert's Start
         if split and split.get("held"):
             reply = {"id": split["job_id"]}
-        else:  # no app: straight to the main PC, where it's held until Start in the app
+        else:  # no app: straight to the first render computer, where it's held until Start in the app
             b64 = base64.urlsafe_b64encode(json.dumps(opts).encode()).decode().rstrip("=")
             with open(packed, "rb") as fh:
-                reply = rq_json(cfg, "receive", b64, stdin=fh, timeout=1800)
+                reply = rq_json(cfg["pcs"][0], "receive", b64, stdin=fh, timeout=1800)
     finally:
         shutil.rmtree(packed.parent, ignore_errors=True)
     ensure_app_running()
@@ -383,14 +409,16 @@ def tool_queue(cfg, args):
 
 
 def find_job(cfg, job_id):
+    """The job, with `_pc`: the computer it's on (none for held and split jobs, which the app has)."""
     if job_id.startswith("held-"):
         return find_held(cfg, job_id)
     if job_id.startswith("split-"):
         return find_split(job_id)
-    for j in rq_json(cfg, "list")["jobs"]:
-        if j["id"] == job_id:
-            return j
-    raise ToolError("No render job %s on the render PC." % job_id)
+    for pc, lst in answering(cfg, "list"):
+        for j in lst["jobs"]:
+            if j["id"] == job_id:
+                return dict(j, _pc=pc, on=pc["name"])
+    raise ToolError("No render job %s on any render computer that answers." % job_id)
 
 
 def tool_job(cfg, args):
@@ -399,13 +427,14 @@ def tool_job(cfg, args):
         return describe(j) if j.get("state") != "started" else j
     if args["job_id"].startswith("split-"):
         return describe(find_split(args["job_id"]))
-    jobs = [j for j in rq_json(cfg, "list")["jobs"] if not j.get("parent")]
-    queued = [j["id"] for j in jobs if j.get("state") == "queued"]
-    for j in jobs:
-        if j["id"] == args["job_id"]:
-            pos = queued.index(j["id"]) + 1 if j["id"] in queued else None
-            return describe(j, pos)
-    raise ToolError("No render job %s on the render PC." % args["job_id"])
+    for pc, lst in answering(cfg, "list"):
+        jobs = [j for j in lst["jobs"] if not j.get("parent")]
+        queued = [j["id"] for j in jobs if j.get("state") == "queued"]
+        for j in jobs:
+            if j["id"] == args["job_id"]:
+                pos = queued.index(j["id"]) + 1 if j["id"] in queued else None
+                return describe(dict(j, on=pc["name"]), pos)
+    raise ToolError("No render job %s on any render computer that answers." % args["job_id"])
 
 
 def sniff_ext(path):
@@ -432,7 +461,7 @@ def tool_download(cfg, args):
     tmp = Path(tempfile.mkdtemp(prefix="blenderrender-dl-"))
     try:
         with open(tmp / "job.tar", "wb") as fh:
-            rq(cfg, "send", job["id"], stdout=fh, timeout=3600)
+            rq(job["_pc"], "send", job["id"], stdout=fh, timeout=3600)
         with tarfile.open(tmp / "job.tar") as tar:
             tar.extractall(tmp)
         dest.mkdir(parents=True, exist_ok=True)
@@ -473,7 +502,7 @@ def download_split(job, args):
 
 def app_action(action, job_id):
     if job_id.startswith("held-"):
-        find_held(None, job_id)
+        find_held(config(), job_id)
     else:
         find_split(job_id)
     reply = ask_app({"action": action, "job": job_id})
@@ -490,8 +519,8 @@ def tool_cancel(cfg, args):
     if args["job_id"].startswith("split-"):
         app_action("cancel", args["job_id"])
         return {"cancelled": args["job_id"], "note": "The render stops on every PC and its frames are deleted."}
-    find_job(cfg, args["job_id"])
-    rq_json(cfg, "cancel", args["job_id"], "--by=claude-connector")
+    job = find_job(cfg, args["job_id"])
+    rq_json(job["_pc"], "cancel", args["job_id"], "--by=claude-connector")
     return {"cancelled": args["job_id"], "note": "Anything already rendered stays downloadable."}
 
 
@@ -502,15 +531,16 @@ def tool_remove(cfg, args):
     if args["job_id"].startswith("split-"):
         app_action("remove", args["job_id"])
         return {"removed": args["job_id"], "note": "Downloads on this Mac are kept."}
-    find_job(cfg, args["job_id"])
-    rq_json(cfg, "delete", args["job_id"], "--by=claude-connector", timeout=60)
-    return {"removed": args["job_id"], "note": "Its files on the render PC are deleted; downloads on this Mac are kept."}
+    job = find_job(cfg, args["job_id"])
+    rq_json(job["_pc"], "delete", args["job_id"], "--by=claude-connector", timeout=60)
+    return {"removed": args["job_id"], "note": "Its files on %s are deleted; downloads on this Mac are kept." % job["on"]}
 
 
 def tool_log(cfg, args):
     if args["job_id"].startswith("split-"):
         return "\n".join(find_split(args["job_id"])["log_lines"][-int(args.get("lines") or 80):]) or "(empty log)"
-    log = rq_json(cfg, "log", args["job_id"]).get("log", "")
+    job = find_job(cfg, args["job_id"])
+    log = rq_json(job["_pc"], "log", args["job_id"]).get("log", "")
     n = int(args.get("lines") or 80)
     # Progress lines are noise in a log read; keep Blender's own output.
     lines = [l for l in log.splitlines() if not l.startswith("progress: ")]
@@ -519,7 +549,7 @@ def tool_log(cfg, args):
 
 JOB_ID = {"type": "string", "description": "Job id as returned by queue_render or render_status, e.g. 20261023-160201-f7a7."}
 TOOLS = [
-    ("render_status", tool_status, "Render PC and BlenderRender queue status: what's rendering (with progress "
+    ("render_status", tool_status, "BlenderRender queue status across all render computers: what's rendering and where (with progress "
      "and time left), what's up next, and recently finished jobs.", {}, [], {"readOnlyHint": True}),
     ("inspect_blend", tool_inspect, "Read a .blend file's render settings with the Mac's Blender before queueing it: "
      "engine, resolution, samples, frame range, camera, whether it outputs video, and textures missing on this Mac.",

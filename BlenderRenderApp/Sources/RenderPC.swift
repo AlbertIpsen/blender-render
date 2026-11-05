@@ -65,13 +65,23 @@ struct Config: Codable, Equatable {
     /// Set by `config(for:)` for a PC found on the network; not saved.
     var netPort: Int?
 
-    /// The PC above and any extras, in the shape split jobs use.
+    /// Every render computer, then This Mac. All alike; `host`, `user`, `queueDir` and `testDir` above
+    /// are only filled in per computer by `config(for:)`.
     var allPCs: [PCEntry] {
-        let mac = PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: true,
-                          testDir: Self.thisMacDir)
-        guard hasMainPC else { return extraPCs + [mac] }
-        return [PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
-                        enabled: mainPCInSplits, testDir: testDir)] + extraPCs + [mac]
+        extraPCs + [PCEntry(id: "mac", name: "This Mac", host: "", user: "", queueDir: "", enabled: true,
+                            testDir: Self.thisMacDir)]
+    }
+
+    /// Settings from before every PC was alike kept one "main PC" in host/user/testDir: move it into the
+    /// list (keeping its id, "main", so its jobs stay with it).
+    mutating func moveMainPCIntoList() -> Bool {
+        guard !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) else { return false }
+        if !extraPCs.contains(where: { $0.id == "main" }) {
+            extraPCs.insert(PCEntry(id: "main", name: "", host: host, user: user, queueDir: queueDir,
+                                    enabled: true, testDir: testDir), at: 0)
+        }
+        (host, user, testDir) = ("", "", "")
+        return true
     }
 
     /// This Mac's own render queue: the same rq.py as on a PC, run by the Mac's Blender.
@@ -85,11 +95,9 @@ struct Config: Codable, Equatable {
         return c
     }
 
-    /// A main PC set up by address (SSH), or a test folder standing in for it.
-    var hasMainPC: Bool { !testDir.isEmpty || (!host.isEmpty && !user.isEmpty) }
-    /// Somewhere to render besides This Mac: the main PC, or computers added from the network.
-    var isConfigured: Bool { hasMainPC || !extraPCs.isEmpty }
-    var displayHost: String { testDir.isEmpty ? host : "this Mac (test mode)" }
+    /// Somewhere to render besides This Mac.
+    var isConfigured: Bool { !extraPCs.isEmpty }
+    var displayHost: String { "your render computers" }
 
     static var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -100,7 +108,8 @@ struct Config: Codable, Equatable {
 
     static func load() -> Config {
         guard let data = try? Data(contentsOf: fileURL),
-              let cfg = try? JSONDecoder().decode(Config.self, from: data) else { return Config() }
+              var cfg = try? JSONDecoder().decode(Config.self, from: data) else { return Config() }
+        if cfg.moveMainPCIntoList() { cfg.save() }
         return cfg
     }
 

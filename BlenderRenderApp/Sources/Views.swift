@@ -258,17 +258,15 @@ struct ConnectionPill: View {
         case .online(let host, _, _): return host
         case .connecting: return "Connecting to \(state.cfg.displayHost)"
         case .offline: return "Can't reach \(state.cfg.displayHost)"
-        case .notConfigured: return "No render PC yet"
+        case .notConfigured: return "No render computers yet"
         }
     }
     private var detail: String {
         switch state.status {
-        case .online(_, let gpu, let worker):
-            let g = gpu.isEmpty ? "GPU shows after the first render." : Notifier.prettyGPU(gpu)
-            return g + "\n" + (worker ? "Queue is running." : "Queue is idle; it starts with the next job.")
-        case .connecting: return "Checking the render queue on the PC."
-        case .offline(let why): return "Is the PC on and awake?\n\n" + why
-        case .notConfigured: return "Enter the PC's address and Windows user in Settings."
+        case .online: return "Each job renders on the computers you switch on for it."
+        case .connecting: return "Checking your render computers."
+        case .offline(let why): return why + "\n\nAre they on, awake and logged in?"
+        case .notConfigured: return "Add one in Settings: Add PC… lists the computers with BlenderRender on this network."
         }
     }
 }
@@ -807,13 +805,13 @@ struct SettingsView: View {
                         Circle().fill(state.pcVersions[pc.id] == nil ? Color.red : state.isOff(pc.id) ? .orange : .green)
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(state.pcName(pc) + (pc.id == "main" ? "  ·  Main" : ""))
+                            Text(state.pcName(pc))
                             Text(pc.id == "mac" ? "Renders with this Mac's own Blender" : !pc.testDir.isEmpty ? "Test folder"
                                  : pc.isNetwork ? "\(pc.host) · found on the network" : pc.host)
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if pc.id != "main" && pc.id != "mac" {
+                        if pc.id != "mac" {
                             Button { form.value.extraPCs.removeAll { $0.id == pc.id } } label: { Image(systemName: "trash") }
                                 .buttonStyle(.borderless).help("Remove this PC")
                         }
@@ -845,15 +843,11 @@ struct SettingsView: View {
                 Text("Stops this Mac and the render PCs sleeping on their own during a render. Screens can still turn off. Shutting a computer down or putting it to sleep by hand still stops it, and a PC that's already asleep can't be reached.")
             }
             Section {
-                TextField("Main PC address", text: $form.value.host, prompt: Text("192.168.1.50"))
-                TextField("Main PC Windows user", text: $form.value.user)
-                TextField("Main PC queue folder", text: $form.value.queueDir)
                 TextField("Blender on this Mac", text: $form.value.macBlender)
-                TextField("Test folder", text: $form.value.testDir, prompt: Text("Empty – use the render PC"))
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("The main PC is one set up by address over SSH, the older way. Blender on this Mac packs each file's textures before upload. A test folder makes this Mac act as the render PC.")
+                Text("Blender on this Mac packs each file's textures before upload, joins split videos, and renders when This Mac is switched on for a job.")
             }
         }
         .formStyle(.grouped)

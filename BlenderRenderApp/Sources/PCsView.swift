@@ -32,7 +32,7 @@ struct PCCards: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
-                       batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id), isMain: pc.id == "main")
+                       batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id))
             }
             if !state.nearbyToAdd.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -54,7 +54,6 @@ struct PCCard: View {
     let live: PCLive?
     let batchesDone: Int
     let speed: Double?
-    let isMain: Bool
 
     private var online: Bool { version != nil && live?.error == nil }
     private var active: [PCJob] {
@@ -108,7 +107,6 @@ struct PCCard: View {
     private var identity: String {
         var parts = [pc.host, pc.user]
         if let b = version?.blender_version, !b.isEmpty { parts.append("Blender " + b) }
-        if isMain { parts.append("Main PC") }
         return parts.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
