@@ -232,7 +232,7 @@ struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: Strin
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 12
+    static let protocolVersion = 13
     let cfg: Config
 
     /// This Mac's name, as BlenderRender PC shows who's connected and who sent a job. Every rq call
