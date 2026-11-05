@@ -82,6 +82,8 @@ final class SplitRun {
     static var root: URL { Config.fileURL.deletingLastPathComponent().appendingPathComponent("splits") }
     private var dir: URL { Self.root.appendingPathComponent(state.id) }
     private var blend: URL { dir.appendingPathComponent("input.blend") }
+    /// Kept after a cancel or a failure, for Render Again, until the job is removed.
+    var keptBlend: URL? { FileManager.default.fileExists(atPath: blend.path) ? blend : nil }
     private var framesDir: URL { dir.appendingPathComponent("frames") }
 
     init(state: SplitState, cfg: Config, onChange: @escaping () -> Void) {
@@ -146,7 +148,7 @@ final class SplitRun {
                 try? await rpc.cacheDrop(id)
             }
         }
-        cleanUp()
+        cleanUp(keepBlend: true)
         changed()
     }
 
@@ -396,7 +398,7 @@ final class SplitRun {
         state.ended = Date().timeIntervalSince1970
         note(reason)
         for pc in state.pcs { let rpc = rpc(pc), id = state.id; Task { try? await rpc.cacheDrop(id) } }
-        cleanUp()
+        cleanUp(keepBlend: true)
         changed()
     }
 
@@ -556,11 +558,11 @@ final class SplitRun {
                                                  "--", framesDir.path, folder.path, b64])
     }
 
-    private func cleanUp() {
+    private func cleanUp(keepBlend: Bool = false) {
         activity = [:]
         batchProgress = [:]
         let fm = FileManager.default
-        try? fm.removeItem(at: blend)
+        if !keepBlend { try? fm.removeItem(at: blend) }
         try? fm.removeItem(at: framesDir)
     }
 }

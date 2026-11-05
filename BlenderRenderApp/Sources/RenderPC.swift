@@ -241,7 +241,7 @@ struct PCVersion: Decodable { let version: Int; let worker: Bool; let gpu: Strin
 
 /// Talks to rq.py on the render PC over SSH (or to a local folder in test mode).
 struct RenderPC {
-    static let protocolVersion = 14
+    static let protocolVersion = 15
     let cfg: Config
 
     /// This Mac's name, as BlenderRender PC shows who's connected and who sent a job. Every rq call
@@ -389,6 +389,8 @@ struct RenderPC {
     /// Let a job that's held on the PC render.
     func release(_ id: String) async throws { _ = try await rq(["release", id]) }
     func pause() async throws { _ = try await rq(["pause"]) }
+    /// A job's .blend, into `file` (Render Again).
+    func fetchBlend(_ id: String, into file: URL) async throws { _ = try await rq(["blend", id], stdoutFile: file) }
     func share(_ on: Bool) async throws { _ = try await rq(["share", on ? "on" : "off"]) }
     func ensureWorker() async throws { _ = try await rq(["ensure-worker"]) }
     /// Replace a worker from before rqnet.py (it never starts it); does nothing mid-render.

@@ -35,7 +35,7 @@ WIN = os.name == "nt"
 PORT = 48211
 BEACON_PORT = 48210
 SHARE = HERE / "share"
-COMMANDS = {"version", "list", "stats", "nudge", "receive", "release", "cancel", "delete", "send", "size",
+COMMANDS = {"version", "list", "stats", "nudge", "receive", "release", "cancel", "delete", "send", "size", "blend",
             "log", "preview", "cache-has", "cache-put", "cache-drop", "batch", "pause", "resume",
             "ensure-worker"}
 SUBMIT = {"receive", "batch", "cache-put"}

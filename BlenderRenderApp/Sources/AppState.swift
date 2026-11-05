@@ -591,6 +591,41 @@ final class AppState: ObservableObject {
         refreshJobs()
     }
 
+    // MARK: render again
+
+    /// A cancelled or failed job whose .blend is still there: on its PC, or on this Mac for a split job.
+    func canRenderAgain(_ job: PCJob) -> Bool {
+        guard job.state == "cancelled" || job.state == "failed", job.parent == nil else { return false }
+        return job.split == true ? splits.run(job.id)?.keptBlend != nil : job.pc != nil
+    }
+
+    /// Back to Waiting to Start with the same settings: its PCs are chosen again and Start pressed.
+    func renderAgain(_ job: PCJob) {
+        let run = splits.run(job.id), kept = run?.keptBlend, split = run?.state
+        let up = Upload(file: URL(fileURLWithPath: job.displayName + ".blend"))
+        uploads.append(up)
+        refreshJobs()
+        let cfg = self.cfg, rpc = rpc(for: job)
+        Task {
+            let fetched = FileManager.default.temporaryDirectory.appendingPathComponent("blenderrender-again-\(UUID().uuidString).blend")
+            defer { try? FileManager.default.removeItem(at: fetched) }
+            do {
+                if kept == nil { try await rpc.fetchBlend(job.id, into: fetched) }
+                let (packed, info) = try await Packer.packAndInspect(kept ?? fetched, cfg: cfg)
+                let animation = split != nil || job.mode == "animation"
+                var s = JobSetup(id: up.id, packed: packed, info: info, name: split?.name ?? job.name ?? job.displayName,
+                                 isAnimation: animation, frame: job.frame ?? job.start ?? info.frame_current,
+                                 start: split?.start ?? job.start ?? info.frame_start, end: split?.end ?? job.end ?? info.frame_end,
+                                 pct: split?.pct ?? job.pct ?? info.pct, samples: split?.samples ?? job.samples ?? info.samples,
+                                 fast: split?.fast ?? false, step: split?.step ?? job.step)
+                s.pcs = defaultPCs(blender: info.blender, animation: animation)
+                hold(s)
+            } catch {
+                update(up.id) { $0.phase = .failed("Couldn't get the file back: " + error.localizedDescription) }
+            }
+        }
+    }
+
     // MARK: waiting to start
 
     private func heldJob(_ job: PCJob) -> HeldJob? {

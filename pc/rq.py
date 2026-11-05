@@ -13,6 +13,7 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq delete <id> [--by=who]  cancel if needed, then remove the job and its files
                              (both log to cancel.log, with `who` and the SSH client, to trace stray cancels)
   rq send <id>               tar of the job's out/ folder on stdout
+  rq blend <id>              the job's .blend on stdout (the app's Render Again)
   rq size <id>               about how many bytes `send` will stream (for the app's progress bar)
   rq log <id>                last 200 lines of the job's Blender log
   rq cache-has <key>         is this split job's .blend already on the PC
@@ -63,7 +64,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 14
+VERSION = 15
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
@@ -473,6 +474,15 @@ def cmd_preview(job_id):
     sys.stdout.buffer.flush()
 
 
+def cmd_blend(job_id):
+    d = job_dir(job_id)
+    if not (d / "input.blend").exists():
+        raise SystemExit("this job's .blend isn't kept on this PC")
+    with open(d / "input.blend", "rb") as fh:
+        shutil.copyfileobj(fh, sys.stdout.buffer, 1 << 20)
+    sys.stdout.buffer.flush()
+
+
 def cmd_off(stop):
     OFF.touch()
     stopped = []
@@ -787,6 +797,8 @@ def main():
         cmd_cancel(rest[0], by_arg(rest))
     elif cmd == "delete":
         cmd_delete(rest[0], by_arg(rest))
+    elif cmd == "blend":
+        cmd_blend(rest[0])
     elif cmd == "send":
         cmd_send(rest[0])
     elif cmd == "size":

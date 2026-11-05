@@ -461,6 +461,7 @@ struct JobRow: View {
             if job.isActive { Button("Cancel Render") { state.cancel(job) } }
             if (job.files ?? 0) > 0 { Button("Download") { state.download(job) } }
             if state.downloaded[job.id] != nil { Button("Show in Finder") { state.reveal(job) } }
+            if state.canRenderAgain(job) { Button("Render Again") { state.renderAgain(job) } }
             Button("Show Blender Log") { logJob = job }
             Divider()
             Button(onThisMac ? "Remove…" : "Remove from Render PC…", role: .destructive) { confirmRemove.value = true }
@@ -519,6 +520,9 @@ struct JobRow: View {
                 .disabled(job.held == true && state.heldPCIDs(job).isEmpty)
         } else if job.isActive {
             Button("Cancel") { state.cancel(job) }.controlSize(.small)
+        } else if state.canRenderAgain(job) && (job.files ?? 0) == 0 {
+            Button { state.renderAgain(job) } label: { Label("Render Again", systemImage: "arrow.clockwise") }
+                .controlSize(.small)
         } else if (job.files ?? 0) > 0 {
             if state.downloads[job.id] != nil {
                 EmptyView()
@@ -537,6 +541,9 @@ struct JobRow: View {
         HStack(spacing: 2) {
             if state.downloaded[job.id] != nil {
                 iconButton("arrow.down.circle", "Download again") { state.download(job) }
+            }
+            if state.canRenderAgain(job) && (job.files ?? 0) > 0 {
+                iconButton("arrow.clockwise", "Render again: back to Waiting to Start") { state.renderAgain(job) }
             }
             iconButton("doc.text.magnifyingglass", "Show Blender log") { logJob = job }
             iconButton("trash", "Remove from render PC") { confirmRemove.value = true }
