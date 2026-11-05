@@ -819,7 +819,7 @@ struct SettingsView: View {
                         }
                     }
                 }
-                Button("Add PC by Address…") { addingPC.value = true }
+                Button("Add PC…") { addingPC.value = true }
             } header: {
                 Text("Render PCs")
             } footer: {
@@ -827,21 +827,6 @@ struct SettingsView: View {
                     Text("Each job waits in the queue until you switch on its PCs and press Start: one PC renders the whole job, two or more split an animation. A split needs this Mac on until it's done; a job on one PC doesn't.")
                     Button("Setting up a new PC? Open the Setup Guide") { state.showGuide = true }.buttonStyle(.link)
                 }
-            }
-            Section {
-                if state.nearbyToAdd.isEmpty {
-                    Text("Computers with BlenderRender on this network show up here.").foregroundStyle(.secondary)
-                }
-                ForEach(state.nearbyToAdd) { n in
-                    NearbyRow(n: n) {
-                        form.value.extraPCs.append(PCEntry(n))
-                        state.saveConfig(form.value)
-                    }
-                }
-            } header: {
-                Text("On This Network")
-            } footer: {
-                Text("A new PC shows up once BlenderRender PC is installed on it; a Mac, once BlenderRender is open with Allow this computer to do render jobs. Add puts it in your render pool.")
             }
             Section("Downloads") {
                 LabeledContent("Save renders to") {
@@ -868,17 +853,13 @@ struct SettingsView: View {
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("Add PC… fills in the main PC's details. Blender on this Mac packs each file's textures before upload. A test folder makes this Mac act as the render PC.")
+                Text("The main PC is one set up by address over SSH, the older way. Blender on this Mac packs each file's textures before upload. A test folder makes this Mac act as the render PC.")
             }
         }
         .formStyle(.grouped)
         .sheet(isPresented: $addingPC.value) {
             AddPCView { pc in
-                if form.value.host.isEmpty {
-                    (form.value.host, form.value.user) = (pc.host, pc.user)
-                } else {
-                    form.value.extraPCs.append(pc)
-                }
+                form.value.extraPCs.append(pc)
                 state.saveConfig(form.value)
             }
         }

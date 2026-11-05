@@ -206,25 +206,31 @@ def cmd_restart_worker():
                        creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.run(["pkill", "-f", f"{HERE / 'rq.py'} worker"], capture_output=True)
-    for _ in range(20):
+    for _ in range(40):
         if not worker_running():
             break
         time.sleep(0.25)
+    time.sleep(1)  # let Task Scheduler see the old worker's task end
     out({"restarted": True, "worker": ensure_worker()})
 
 
 def ensure_worker():
     if worker_running():
         return True
-    if WIN:
-        subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
-    else:  # test mode on a Mac: a detached child
-        subprocess.Popen([sys.executable, str(HERE / "rq.py"), "worker"], start_new_session=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(20):
-        time.sleep(0.25)
-        if worker_running():
-            return True
+    for attempt in range(3):
+        if WIN:
+            flags = subprocess.CREATE_NO_WINDOW
+            if attempt:  # Task Scheduler still counts a worker that was just stopped as running and ignores /run
+                subprocess.run(["schtasks", "/end", "/tn", TASK_NAME], capture_output=True, creationflags=flags)
+                time.sleep(1)
+            subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True, creationflags=flags)
+        elif attempt == 0:  # test mode on a Mac: a detached child
+            subprocess.Popen([sys.executable, str(HERE / "rq.py"), "worker"], start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(20):
+            time.sleep(0.25)
+            if worker_running():
+                return True
     return False
 
 
@@ -278,6 +284,36 @@ def cmd_stats():
     out(info)
 
 
+def from_name():
+    """The calling Mac's name: BR_FROM, or BR_FROM_B64 over SSH (base64 survives Windows' command line)."""
+    name = os.environ.get("BR_FROM") or ""
+    if not name and os.environ.get("BR_FROM_B64"):
+        try:
+            name = base64.b64decode(os.environ["BR_FROM_B64"]).decode("utf-8")
+        except ValueError:
+            pass
+    return name.strip()[:64]
+
+
+def note_client():
+    """Remember which Mac is talking to this queue (BR_FROM: its name, set by the app), for BlenderRender PC."""
+    name = from_name()
+    if not name:
+        return
+    try:
+        clients = read_json(HERE / "clients.json", {})
+        clients[name] = time.time()
+        write_json(HERE / "clients.json", {k: v for k, v in clients.items() if time.time() - v < 7 * 86400})
+    except (OSError, ValueError):
+        pass
+
+
+def recent_clients(secs=600):
+    clients = read_json(HERE / "clients.json", {})
+    return sorted(({"name": k, "seen": v} for k, v in clients.items() if time.time() - v < secs),
+                  key=lambda c: -c["seen"])
+
+
 def cmd_list():
     jobs = []
     if JOBS.is_dir():
@@ -291,7 +327,8 @@ def cmd_list():
     jobs.sort(key=lambda j: j.get("submitted", 0))
     state = read_json(HERE / "worker_state.json", {})
     out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
-         "paused": PAUSED.exists(), "share": (HERE / "share").exists()})
+         "paused": PAUSED.exists(), "share": (HERE / "share").exists(), "clients": recent_clients(),
+         "now": time.time()})
 
 
 def cmd_receive(b64):
@@ -311,6 +348,7 @@ def cmd_receive(b64):
         raise SystemExit("no data received")
     os.replace(part, d / "input.blend")
     opts["submitted"] = time.time()
+    opts.setdefault("from", from_name() or None)  # which Mac sent it, for BlenderRender PC
     opts["size"] = size
     write_json(d / "job.json", opts)
     # Held unless the app's Start sent it: a job from a script or an older connector waits for Albert.
@@ -366,6 +404,7 @@ def cmd_batch(b64):
     d = JOBS / job_id
     d.mkdir(parents=True)
     opts["submitted"] = time.time()
+    opts.setdefault("from", from_name() or None)  # which Mac sent it, for BlenderRender PC
     write_json(d / "job.json", opts)
     update_status(d, state="queued")
     out({"id": job_id, "worker": ensure_worker()})
@@ -721,6 +760,8 @@ def main():
     if not args:
         raise SystemExit(__doc__)
     cmd, rest = args[0], args[1:]
+    if cmd != "worker":
+        note_client()  # only callers that name themselves: a Mac's app, not BlenderRender PC's own look
     if cmd == "version":
         cmd_version()
     elif cmd == "list":

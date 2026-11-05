@@ -60,89 +60,40 @@ struct SetupCommand: View {
     }
 }
 
-/// Add PC: fetch or copy the script, run it on the PC, paste back the code it prints.
+/// Add PC: the computers with BlenderRender on this network, each with an Add button.
 struct AddPCView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var code = Box("")
-    @StateObject private var copied = Box(false)
-    @StateObject private var problem = Box<String?>(nil)
-    @StateObject private var checking = Box(false)
-    @StateObject private var linkLive = Box(false)
     let add: (PCEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Add a Render PC").font(.title2.weight(.semibold))
-            Text("1. On the PC, install the same Blender version as this Mac and the latest NVIDIA driver.")
-            VStack(alignment: .leading, spacing: 6) {
-                Text("2. On the PC, open a web browser and go to this address. Download **BlenderRender PC**, open it and click **Set Up This PC**. It works while this window is open.")
-                    .fixedSize(horizontal: false, vertical: true)
-                SetupCommand(onPair: { pairing in
-                    code.value = pairing
-                    connect()
-                }, isLive: $linkLive.value)
-                HStack(spacing: 6) {
-                    Text("Doesn't connect?").foregroundStyle(.secondary)
-                    Button { copyScript() } label: {
-                        Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")
-                    }
-                    Text("and paste it instead.").foregroundStyle(.secondary)
+            Text("Add a Render Computer").font(.title2.weight(.semibold))
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Looking for computers with BlenderRender on this network…").foregroundStyle(.secondary)
+            }
+            VStack(spacing: 10) {
+                if state.nearbyToAdd.isEmpty {
+                    Text("None yet").foregroundStyle(.tertiary).frame(maxWidth: .infinity, minHeight: 60)
+                }
+                ForEach(state.nearbyToAdd) { n in
+                    NearbyRow(n: n) { add(PCEntry(n)) }
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("3. When the PC finishes, it sends its pairing code here and connects. If it can't, it shows a code that starts with BR1:; paste that here.")
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("BR1:…", text: $code.value).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
-                if checking.value || (linkLive.value && code.value.isEmpty) {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(checking.value ? "Connecting to the PC…" : "Waiting for the PC to finish…").foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let problem = problem.value {
-                Text(problem).font(.callout).foregroundStyle(.red).textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
+            .animation(.default, value: state.nearbyToAdd)
+            Text("Not listed? On a PC, install BlenderRender PC and click Set Up This PC. On a Mac, open BlenderRender and switch on Allow this computer to do render jobs.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Setup Guide") { dismiss(); state.showGuide = true }.buttonStyle(.link)
+                Button("Setup Guide") { state.showGuide = true; dismiss() }.buttonStyle(.link)
                 Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                Button("Add PC") { connect() }
-                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(code.value.isEmpty || checking.value)
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
-        .font(.callout)
-        .padding(24)
-        .frame(width: 460)
-    }
-
-    private func copyScript() {
-        guard let text = SetupScript.withKey() else { problem.value = SetupScript.keyProblem; return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        copied.value = true
-    }
-
-    private func connect() {
-        guard let pc = PCEntry(pairingCode: code.value) else {
-            problem.value = "That isn't a pairing code. Copy the whole line that starts with BR1:."
-            return
-        }
-        checking.value = true
-        problem.value = nil
-        Task {
-            defer { checking.value = false }
-            do {
-                _ = try await RenderPC(cfg: state.cfg.config(for: pc)).connect()
-                add(pc)
-                dismiss()
-            } catch {
-                problem.value = "Couldn't connect to \(pc.host). Is the PC on, on this network, and set to a Private network in Windows Settings?\n\n\(error.localizedDescription)"
-            }
-        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 
@@ -183,7 +134,7 @@ struct GuideView: View {
                     step(4, "Add it here", symbol: "plus.circle") {
                         Text("The PC shows up on this Mac under **On This Network**, in Settings and in the Render PCs panel. Click **Add**. Other Macs with BlenderRender can add it too.")
                         Button("Open Settings…") { openSettings() }.padding(.top, 4)
-                        Text("No network between the Mac and the PC? **Copy Script** and paste it into an administrator PowerShell on the PC (AnyDesk shares the clipboard), or **Save as File…**; it sets the PC up over SSH and prints a pairing code for **Add PC by Address…**.").padding(.top, 8)
+                        Text("No network between the Mac and the PC? **Copy Script** and paste it into an administrator PowerShell on the PC (AnyDesk shares the clipboard), or **Save as File…**; it sets the PC up over SSH and prints a pairing code under **Main PC** in Settings › Advanced.").padding(.top, 8)
                         HStack(spacing: 8) {
                             Button { copyScript() } label: {
                                 Label(copied.value ? "Copied" : "Copy Script", systemImage: copied.value ? "checkmark" : "doc.on.doc")

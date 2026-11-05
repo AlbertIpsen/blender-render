@@ -63,7 +63,8 @@ class Handler(socketserver.StreamRequestHandler):
         sock = self.request
         try:
             line = self.rfile.readline(65536)
-            args = json.loads(line)["args"]
+            req = json.loads(line)
+            args = req["args"]
             if not (isinstance(args, list) and args and all(isinstance(a, str) for a in args)):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
@@ -73,7 +74,8 @@ class Handler(socketserver.StreamRequestHandler):
         if args[0] in SUBMIT and not allowed():
             return self.fail(sock, "This computer doesn't allow render jobs right now")
         flags = subprocess.CREATE_NO_WINDOW if WIN else 0
-        proc = subprocess.Popen([sys.executable, str(HERE / "rq.py"), *args], cwd=HERE, creationflags=flags,
+        env = dict(os.environ, BR_FROM=str(req.get("from") or self.client_address[0])[:64])
+        proc = subprocess.Popen([sys.executable, str(HERE / "rq.py"), *args], cwd=HERE, creationflags=flags, env=env,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         errors = []
 
@@ -180,7 +182,7 @@ def serve():
 def call(host, port, args):
     sock = socket.create_connection((host, int(port)), timeout=8)
     sock.settimeout(None)
-    sock.sendall(json.dumps({"args": args}).encode() + b"\n")
+    sock.sendall(json.dumps({"args": args, "from": os.environ.get("BR_FROM", "")}).encode() + b"\n")
 
     def feed():
         try:

@@ -5,6 +5,6 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DOTNET="${DOTNET:-$HOME/.dotnet/dotnet}"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
-"$DOTNET" build "$HERE/BlenderRenderPC.csproj" -c Release -o "$HERE/bin/out" -v quiet -nologo
+"$DOTNET" build "$HERE/BlenderRenderPC.csproj" -c Release -o "$HERE/bin/out" -v quiet -nologo -p:Version="$(cat "$HERE/../VERSION")"
 cp "$HERE/bin/out/BlenderRenderPC.exe" "$HERE/../pc/BlenderRenderPC.exe"
 echo "built pc/BlenderRenderPC.exe"

@@ -235,6 +235,14 @@ struct RenderPC {
     static let protocolVersion = 12
     let cfg: Config
 
+    /// This Mac's name, as BlenderRender PC shows who's connected and who sent a job. Every rq call
+    /// carries it (BR_FROM): rqnet.py and a local rq.py read it from the environment, SSH gets it set.
+    static let fromName: String = {
+        let name = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let ok = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_.'’()"))
+        return String(String.UnicodeScalarView(name.unicodeScalars.filter(ok.contains)).prefix(64))
+    }()
+
     private var sshOptions: [String] {
         // BatchMode can't answer "trust this host?", so a new PC needs accept-new or it never connects.
         ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=15",
@@ -252,7 +260,9 @@ struct RenderPC {
             return try await Shell.run("/usr/bin/python3", [net.path, "call", cfg.host, String(port)] + args,
                                        stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
         }
-        let cmd = "\"\(cfg.queueDir)\\rq.cmd\" " + args.joined(separator: " ")
+        // Base64: Windows' command line would mangle a name like "Albert’s Mac" or "Søren's Mac".
+        let from = Data(Self.fromName.utf8).base64EncodedString()
+        let cmd = "set BR_FROM_B64=\(from)&& \"\(cfg.queueDir)\\rq.cmd\" " + args.joined(separator: " ")
         return try await Shell.run("/usr/bin/ssh", sshOptions + [cmd],
                                    stdinFile: stdinFile, stdoutFile: stdoutFile, progress: progress)
     }

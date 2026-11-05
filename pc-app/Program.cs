@@ -60,6 +60,11 @@ namespace BlenderRenderPC
             single.ReleaseMutex();
         }
 
+        /// "1.5.2", stamped in by pc-app/build.sh from the repo's VERSION.
+        public static string Version =>
+            ((System.Reflection.AssemblyInformationalVersionAttribute)Attribute.GetCustomAttribute(typeof(Program).Assembly,
+                typeof(System.Reflection.AssemblyInformationalVersionAttribute)))?.InformationalVersion ?? "?";
+
         /// Set up from a Mac's Add PC page: its script, with SSH and pairing.
         public static bool FromMac => MacScript() != null;
 
@@ -119,6 +124,8 @@ namespace BlenderRenderPC
         public string Error;
         public Dictionary<string, object> Rendering;
         public int Waiting;
+        /// Macs that used the queue lately, newest first, with how many seconds ago (PC clock).
+        public List<KeyValuePair<string, double>> Clients = new List<KeyValuePair<string, double>>();
 
         public static QueueState Read()
         {
@@ -131,6 +138,10 @@ namespace BlenderRenderPC
                 q.Off = data.TryGetValue("off", out var off) && off is bool b && b;
                 q.Worker = data.TryGetValue("worker", out var w) && w is bool wb && wb;
                 q.Paused = data.TryGetValue("paused", out var pz) && pz is bool pb && pb;
+                double now = data.TryGetValue("now", out var n) && n != null ? Convert.ToDouble(n) : 0;
+                if (data.TryGetValue("clients", out var cl) && cl is System.Collections.ArrayList list)
+                    foreach (Dictionary<string, object> c in list)
+                        q.Clients.Add(new KeyValuePair<string, double>(Convert.ToString(c["name"]), now - Convert.ToDouble(c["seen"])));
                 foreach (Dictionary<string, object> job in ((System.Collections.ArrayList)data["jobs"]))
                 {
                     var state = job.TryGetValue("state", out var s) ? s as string : null;
@@ -147,6 +158,20 @@ namespace BlenderRenderPC
 
         public double Progress => Num(Rendering, "progress");
 
+        /// "Connected: Albert's Mac mini" (heard from in the last minute), else the last one and when.
+        public string Connected
+        {
+            get
+            {
+                if (!Reachable) return "";
+                var now = Clients.Where(c => c.Value < 60).Select(c => c.Key).ToList();
+                if (now.Count > 0) return "Connected: " + string.Join(", ", now);
+                if (Clients.Count == 0) return "No Mac connected right now";
+                var last = Clients[0];
+                return $"No Mac connected right now · last: {last.Key}, {Math.Max(1, (int)(last.Value / 60))} min ago";
+            }
+        }
+
         /// "Rendering Wall_1080p60" / "Rendering frames 120–155 of Wall_1080p60 (split job)"
         public string Headline
         {
@@ -160,7 +185,7 @@ namespace BlenderRenderPC
                         ? $"Rendering frames {Str(Rendering, "start")}–{Str(Rendering, "end")} of {name} (split job)"
                         : $"Rendering {name}";
                 }
-                return Paused ? "Paused from the Mac" : Off ? "Switched off" : "Ready for render jobs";
+                return Paused ? "Paused from the Mac" : Off ? "Switched off" : "Standby: ready for render jobs";
             }
         }
 
@@ -171,6 +196,8 @@ namespace BlenderRenderPC
                 var parts = new List<string>();
                 if (Rendering != null)
                 {
+                    var from = Str(Rendering, "from");
+                    if (from != null) parts.Add("for " + from);
                     parts.Add($"{(int)(Progress * 100)}%");
                     var frame = Str(Rendering, "frame");
                     if (frame != null && Str(Rendering, "mode") == "animation") parts.Add("frame " + frame);
@@ -353,7 +380,16 @@ namespace BlenderRenderPC
         public static void Run()
         {
             try { Scripts(); } catch { }
-            try { App(); } catch { }  // offline, or GitHub busy: next time
+            try { App(false); } catch { }  // offline, or GitHub busy: next time
+        }
+
+        /// The Check for updates link: look now, whatever was last seen, and say what happened.
+        public static string CheckNow()
+        {
+            if (!File.Exists(Paths.Installed) || !Rq.Installed) return "Set this PC up first; BlenderRender PC then keeps itself up to date.";
+            try { Scripts(); } catch { }
+            try { return App(true); }
+            catch (Exception e) { return "Couldn't reach GitHub to check: " + e.Message; }
         }
 
         /// This copy carries newer queue scripts than the PC has (a Mac may have sent older ones meanwhile).
@@ -367,7 +403,7 @@ namespace BlenderRenderPC
         }
 
         /// A newer BlenderRenderPC.exe in the latest release: put it in place; the running copy restarts from it.
-        static void App()
+        static string App(bool force)
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             using (var web = new WebClient())
@@ -375,7 +411,7 @@ namespace BlenderRenderPC
                 web.Headers.Add("User-Agent", "BlenderRenderPC");
                 var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(web.DownloadString(Latest));
                 var tag = Convert.ToString(release["tag_name"]);
-                if (File.Exists(Stamp) && File.ReadAllText(Stamp).Trim() == tag) return;
+                if (!force && File.Exists(Stamp) && File.ReadAllText(Stamp).Trim() == tag) return "";
                 var asset = ((System.Collections.ArrayList)release["assets"]).Cast<Dictionary<string, object>>()
                     .FirstOrDefault(a => Convert.ToString(a["name"]) == "BlenderRenderPC.exe");
                 if (asset != null)
@@ -393,8 +429,12 @@ namespace BlenderRenderPC
                         Rq.Run("install-tray", 60000);
                     }
                     File.Delete(download);
+                    File.WriteAllText(Stamp, tag);
+                    return same ? $"BlenderRender PC is up to date ({tag})."
+                                : $"Updating to {tag}. BlenderRender PC restarts in a moment.";
                 }
                 File.WriteAllText(Stamp, tag);
+                return $"BlenderRender PC is up to date ({tag}).";
             }
         }
     }
@@ -485,6 +525,8 @@ namespace BlenderRenderPC
         readonly Label toggleLabel = new Label { AutoSize = true, Text = "Allow this computer to do render jobs" };
         readonly Label headline = new Label { AutoSize = true, MaximumSize = new Size(400, 0) };
         readonly Label detail = new Label { AutoSize = true, MaximumSize = new Size(400, 0), ForeColor = SystemColors.GrayText };
+        readonly Label connected = new Label { AutoSize = true, MaximumSize = new Size(400, 0), ForeColor = SystemColors.GrayText, Margin = new Padding(0, 10, 0, 0) };
+        readonly LinkLabel checkUpdates = new LinkLabel { AutoSize = true, Text = "Check for updates", Margin = new Padding(0, 0, 16, 0) };
         readonly ProgressBar progress = new ProgressBar { Maximum = 1000, Height = 8, Width = 400 };
         readonly LinkLabel setupAgain = new LinkLabel { AutoSize = true, Text = "Set up again…" };
         readonly Label setupText = new Label { AutoSize = true, MaximumSize = new Size(400, 0) };
@@ -510,7 +552,7 @@ namespace BlenderRenderPC
             var header = new Panel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(20, 16, 20, 0) };
             var logo = new PictureBox { Image = Program.AppIcon(48).ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom, Size = new Size(36, 36), Location = new Point(20, 16) };
             var title = new Label { Text = "BlenderRender PC", AutoSize = true, Location = new Point(64, 14), Font = new Font(Font.FontFamily, 13f, FontStyle.Bold) };
-            var sub = new Label { Text = Environment.MachineName, AutoSize = true, Location = new Point(66, 38), ForeColor = SystemColors.GrayText };
+            var sub = new Label { Text = Environment.MachineName + " · version " + Program.Version, AutoSize = true, Location = new Point(66, 38), ForeColor = SystemColors.GrayText };
             header.Controls.AddRange(new Control[] { logo, title, sub });
 
             BuildStatus();
@@ -539,9 +581,11 @@ namespace BlenderRenderPC
             var folder = new LinkLabel { AutoSize = true, Text = "Open render folder", Margin = new Padding(0, 0, 16, 0) };
             folder.LinkClicked += (s, e) => { if (Directory.Exists(Paths.Root)) Process.Start("explorer.exe", Paths.Root); };
             setupAgain.LinkClicked += (s, e) => { setupPanelForced = true; ShowPanel(); };
+            checkUpdates.LinkClicked += (s, e) => CheckForUpdates();
             links.Controls.Add(folder);
+            links.Controls.Add(checkUpdates);
             links.Controls.Add(setupAgain);
-            flow.Controls.AddRange(new Control[] { row, headline, progress, detail, links });
+            flow.Controls.AddRange(new Control[] { row, headline, progress, detail, connected, links });
         }
 
         bool setupPanelForced;
@@ -596,8 +640,21 @@ namespace BlenderRenderPC
             toggleLabel.Enabled = q.Reachable;
             headline.Text = q.Headline;
             detail.Text = q.Detail;
+            connected.Text = q.Connected;
             progress.Visible = q.Rendering != null;
             progress.Value = Math.Max(0, Math.Min(1000, (int)(q.Progress * 1000)));
+        }
+
+        void CheckForUpdates()
+        {
+            checkUpdates.Enabled = false;
+            checkUpdates.Text = "Checking…";
+            Task.Run(() => SelfUpdate.CheckNow()).ContinueWith(t =>
+            {
+                checkUpdates.Enabled = true;
+                checkUpdates.Text = "Check for updates";
+                MessageBox.Show(this, t.Result, "BlenderRender PC", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         /// Runs the Mac's setup script elevated, then starts the installed copy in the taskbar corner.

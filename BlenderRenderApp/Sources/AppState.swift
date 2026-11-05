@@ -103,6 +103,7 @@ final class AppState: ObservableObject {
     var finished: [PCJob] { jobs.filter { !$0.isActive && $0.state != "held" }.sorted { ($0.ended ?? $0.submitted ?? 0) > ($1.ended ?? $1.submitted ?? 0) } }
 
     init() {
+        setenv("BR_FROM", RenderPC.fromName, 1)  // passed on to every rq call, see RenderPC.fromName
         Notifier.shared.setUp()
         Notifier.shared.onAction = { [weak self] id, action in self?.handleNotification(job: id, action: action) }
         startPolling()
@@ -198,7 +199,16 @@ final class AppState: ObservableObject {
         }
         await withTaskGroup(of: (String, PCVersion?).self) { group in
             for pc in cfg.allPCs {
-                group.addTask { (pc.id, try? await RenderPC(cfg: cfg.config(for: pc)).connect()) }
+                group.addTask {
+                    let rpc = RenderPC(cfg: cfg.config(for: pc))
+                    var v = try? await rpc.connect()
+                    // The worker keeps rqnet.py running, so other computers can find the PC: start it if it's stopped.
+                    if pc.id != "mac", let got = v, !got.worker || got.agent == false {
+                        try? await rpc.ensureWorker()
+                        v = (try? await rpc.version()) ?? v
+                    }
+                    return (pc.id, v)
+                }
             }
             var found: [String: PCVersion] = [:]
             for await (id, version) in group { found[id] = version }
@@ -373,6 +383,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// A PC's worker stopped (it also keeps rqnet.py running): start it, at most every 2 minutes.
+    private var workerNudged: [String: Date] = [:]
+    private func keepWorker(_ id: String, _ list: PCList) {
+        guard !list.worker, id != "mac", Date().timeIntervalSince(workerNudged[id] ?? .distantPast) > 120,
+              let pc = cfg.allPCs.first(where: { $0.id == id }) else { return }
+        workerNudged[id] = Date()
+        let rpc = RenderPC(cfg: cfg.config(for: pc))
+        Task.detached { try? await rpc.ensureWorker() }
+    }
+
     // MARK: Pause All
 
     /// Every PC freezes its render where it is and starts nothing new, until Resume All. Kept across
@@ -444,6 +464,7 @@ final class AppState: ObservableObject {
         for (id, list) in results {
             guard let list else { continue }
             pcVersions[id]?.off = Self.isOff(list, cfg.allPCs.first { $0.id == id })
+            keepWorker(id, list)
             syncPause(id, reported: list.paused == true)
             let jobs = list.jobs
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
@@ -476,6 +497,7 @@ final class AppState: ObservableObject {
             }
             pcVersions["main"]?.off = list.off
             syncPause("main", reported: list.paused == true)
+            keepWorker("main", list)
             jobsByPC["main"] = list.jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = "main"; return j }  // batches show as their split job
             refreshJobs()
             if case .online(let host, let gpu, _) = status {
