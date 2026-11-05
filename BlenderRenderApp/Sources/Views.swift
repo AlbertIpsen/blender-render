@@ -34,6 +34,15 @@ struct ContentView: View {
                         .help(showPCs ? "Hide the render PCs" : "Show what each render PC is doing")
                         .disabled(!state.cfg.isConfigured)
                 }
+                ToolbarItem(placement: .automatic) {
+                    Button { state.setPausedAll(!state.pausedAll) } label: {
+                        Label(state.pausedAll ? "Resume All" : "Pause All",
+                              systemImage: state.pausedAll ? "play.fill" : "pause.fill")
+                    }
+                    .help(state.pausedAll ? "Carry on rendering on every PC, from where each one stopped"
+                                          : "Pause rendering on every PC; each one carries on from the same spot when you resume")
+                    .disabled(!state.cfg.isConfigured)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { picking.value = true } label: { Label("Add Files", systemImage: "plus") }
                         .help("Add .blend files to the render queue")
@@ -44,7 +53,13 @@ struct ContentView: View {
                 ScrollView { PCCards().padding(12) }
                     .inspectorColumnWidth(min: 280, ideal: 320, max: 460)
             }
-            .safeAreaInset(edge: .top, spacing: 0) { if state.update != nil { UpdateBanner() } }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    if state.update != nil { UpdateBanner() }
+                    if state.pausedAll { PausedBanner() }
+                }
+            }
+            .animation(uiAnimation(reduceMotion), value: state.pausedAll)
             .animation(uiAnimation(reduceMotion), value: state.update)
             .navigationTitle("BlenderRender")
             .navigationSubtitle(state.summary)
@@ -90,6 +105,26 @@ struct UpdateBanner: View {
             Button("Later") { state.update = nil }.disabled(state.installingUpdate)
             Button("Update & Restart") { state.installUpdate() }
                 .buttonStyle(.borderedProminent).disabled(state.installingUpdate)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+/// Pause All is on: easy to forget, so it stays in sight until resumed.
+struct PausedBanner: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Rendering is paused on every PC").font(.callout.weight(.medium))
+                Text("Renders are frozen where they are, and nothing new starts.").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Resume All") { state.setPausedAll(false) }.buttonStyle(.borderedProminent)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .background(.bar)
@@ -529,6 +564,7 @@ struct JobRow: View {
     private var detail: String {
         switch job.state {
         case "rendering":
+            if job.paused == true { return "Paused · " + job.progressText }
             return job.note ?? job.progressText
         case "queued":
             return position == 1 ? "Starts next" : "Waiting · \(position ?? 0) in line"

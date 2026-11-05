@@ -25,6 +25,9 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq off [--stop]            switch the PC off for rendering: nothing new starts; --stop also puts
                              the render in progress back in line
   rq on                      switch it back on
+  rq pause                   the Mac's Pause All: freeze the render in progress where it is and start
+                             nothing new (separate from `off`, which is the PC owner's switch)
+  rq resume                  carry on from the same frame and sample
   rq install-tray            put a new BlenderRenderPC.exe (sent as BlenderRenderPC.exe.new) in place,
                              make sure it starts at logon, and start it if it isn't running
 
@@ -67,6 +70,7 @@ TASK_NAME = "BlenderRenderQueue"
 TRAY_TASK = "BlenderRenderPC"
 TRAY = HERE / "BlenderRenderPC.exe"
 OFF = HERE / "off"
+PAUSED = HERE / "paused"
 
 
 def config():
@@ -186,7 +190,7 @@ def blender_version():
 def cmd_version():
     state = read_json(HERE / "worker_state.json", {})
     out({"version": VERSION, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
-         "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
+         "paused": PAUSED.exists(), "blender": config()["blender"], "blender_version": blender_version(), "host": os.environ.get("COMPUTERNAME") or os.uname().nodename})
 
 
 def cmd_stats():
@@ -217,7 +221,8 @@ def cmd_list():
             jobs.append(job)
     jobs.sort(key=lambda j: j.get("submitted", 0))
     state = read_json(HERE / "worker_state.json", {})
-    out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists()})
+    out({"jobs": jobs, "worker": worker_running(), "gpu": state.get("gpu", ""), "off": OFF.exists(),
+         "paused": PAUSED.exists()})
 
 
 def cmd_receive(b64):
@@ -377,6 +382,27 @@ def cmd_on():
     out({"off": False, "worker": ensure_worker()})
 
 
+def cmd_pause():
+    PAUSED.touch()
+    out({"paused": True})
+
+
+def cmd_resume():
+    PAUSED.unlink(missing_ok=True)
+    out({"paused": False, "worker": ensure_worker()})
+
+
+def freeze(proc, on):
+    """Suspend or resume Blender in place: the GPU stops, and nothing it has done so far is lost."""
+    if WIN:
+        import ctypes
+        fn = ctypes.windll.ntdll.NtSuspendProcess if on else ctypes.windll.ntdll.NtResumeProcess
+        fn(ctypes.c_void_p(int(proc._handle)))
+    else:
+        import signal
+        os.kill(proc.pid, signal.SIGSTOP if on else signal.SIGCONT)
+
+
 def cmd_install_tray():
     """The running tray app notices its exe changed and restarts itself from the new one."""
     new = HERE / "BlenderRenderPC.exe.new"
@@ -466,10 +492,10 @@ def nudge_awake(hold=None):
 def render(d, cfg):
     """Render a job, keeping the PC from sleeping on its own unless the Mac's setting says otherwise.
 
-    Switched off, it leaves the job queued; the wait is here because a worker started by an older
-    rq.py only reloads this function.
+    Switched off or paused, it leaves the job queued; the wait is here because a worker started by an
+    older rq.py only reloads this function.
     """
-    if OFF.exists():
+    if OFF.exists() or PAUSED.exists():
         time.sleep(2)
         return
     hold = read_json(d / "job.json", {}).get("keep_awake", True)
@@ -508,6 +534,7 @@ def render_job(d, cfg):
     threading.Thread(target=pump, daemon=True).start()
 
     saved, last_write, st = 0, 0.0, {}
+    frozen, frozen_at = False, 0.0
     eta = Eta(frames, start, step)
     with open(d / "log.txt", "w", encoding="utf-8") as log:
         while True:
@@ -537,6 +564,18 @@ def render_job(d, cfg):
                     st.update(frame=frame, sample=s, samples=n, remaining=m.group(4),
                               progress=min(1.0, (done_frames + s / max(n, 1)) / frames),
                               eta=None if left is None else round(left), eta_at=now)
+            want = PAUSED.exists() and not (d / "cancel").exists()
+            if want != frozen and proc.poll() is None:
+                try:
+                    freeze(proc, want)
+                    frozen = want
+                    st.update(paused=want, eta=None)
+                    if want:
+                        frozen_at = time.time()
+                    else:
+                        eta.frame_t0 += time.time() - frozen_at  # the paused time isn't render speed
+                except OSError:
+                    pass
             if (d / "cancel").exists() and proc.poll() is None:
                 proc.terminate()
                 try:
@@ -547,11 +586,12 @@ def render_job(d, cfg):
                 update_status(d, **st)
                 st, last_write = {}, time.time()
     rc = proc.wait()
+    st["paused"] = False
     if (d / "requeue").exists():  # stopped by `off --stop`: back in line, from the start
         shutil.rmtree(d / "out", ignore_errors=True)
         for flag in ("requeue", "cancel"):
             (d / flag).unlink(missing_ok=True)
-        update_status(d, state="queued", progress=0.0, saved=0, eta=None, frame=None, started=None)
+        update_status(d, state="queued", progress=0.0, saved=0, eta=None, frame=None, started=None, paused=False)
         return
     files = sum(1 for p in (d / "out").rglob("*") if p.is_file())
     if (d / "cancel").exists():
@@ -643,6 +683,10 @@ def main():
         cmd_off("--stop" in rest)
     elif cmd == "on":
         cmd_on()
+    elif cmd == "pause":
+        cmd_pause()
+    elif cmd == "resume":
+        cmd_resume()
     elif cmd == "install-tray":
         cmd_install_tray()
     elif cmd == "ensure-worker":

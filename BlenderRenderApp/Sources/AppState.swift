@@ -84,7 +84,7 @@ final class AppState: ObservableObject {
 
     /// Window subtitle: what the queue is doing right now.
     var summary: String {
-        var parts: [String] = []
+        var parts: [String] = pausedAll ? ["Paused"] : []
         if !uploads.isEmpty { parts.append("\(uploads.count) sending") }
         if !downloads.isEmpty { parts.append("\(downloads.count) downloading") }
         if let job = rendering.first {
@@ -218,7 +218,8 @@ final class AppState: ObservableObject {
                         if version == nil { version = try await rpc.connect() }
                         let list = try await rpc.list()
                         version?.off = list.off
-                        return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date(), off: list.off == true))
+                        return (pc.id, version, PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date(), off: list.off == true,
+                                                      paused: list.paused == true))
                     } catch {
                         return (pc.id, nil, PCLive(error: error.localizedDescription))
                     }
@@ -308,6 +309,32 @@ final class AppState: ObservableObject {
     }
 
     /// The PC holding this job.
+    // MARK: Pause All
+
+    /// Every PC freezes its render where it is and starts nothing new, until Resume All. Kept across
+    /// launches, and a PC that was offline or added since gets it on the next poll.
+    @Published private(set) var pausedAll = UserDefaults.standard.bool(forKey: "pausedAll")
+    private var pauseSyncing: Set<String> = []
+
+    func setPausedAll(_ on: Bool) {
+        pausedAll = on
+        UserDefaults.standard.set(on, forKey: "pausedAll")
+        for pc in cfg.allPCs { syncPause(pc.id, reported: !on) }
+    }
+
+    /// Tell a PC to pause or resume when what it reports differs from Pause All.
+    private func syncPause(_ id: String, reported: Bool) {
+        guard reported != pausedAll, !pauseSyncing.contains(id),
+              let pc = cfg.allPCs.first(where: { $0.id == id }) else { return }
+        pauseSyncing.insert(id)
+        let rpc = RenderPC(cfg: cfg.config(for: pc)), on = pausedAll
+        Task {
+            if on { try? await rpc.pause() } else { try? await rpc.resume() }
+            pauseSyncing.remove(id)
+            pcLive[id]?.paused = on
+        }
+    }
+
     private func rpc(for job: PCJob) -> RenderPC {
         guard let id = job.pc, id != "main", let pc = cfg.allPCs.first(where: { $0.id == id }) else { return pc }
         return RenderPC(cfg: cfg.config(for: pc))
@@ -353,6 +380,7 @@ final class AppState: ObservableObject {
         for (id, list) in results {
             guard let list else { continue }
             pcVersions[id]?.off = list.off
+            syncPause(id, reported: list.paused == true)
             let jobs = list.jobs
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
         }
@@ -379,6 +407,7 @@ final class AppState: ObservableObject {
                 downloaded[id] = path
             }
             pcVersions["main"]?.off = list.off
+            syncPause("main", reported: list.paused == true)
             jobsByPC["main"] = list.jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = "main"; return j }  // batches show as their split job
             refreshJobs()
             if case .online(let host, let gpu, _) = status {

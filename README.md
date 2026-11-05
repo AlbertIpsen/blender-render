@@ -59,7 +59,7 @@ When it's done, the PC appears in the Mac's Render PCs list by itself, and the M
 
 ## The queue
 
-Every job waits under Waiting to Start until you press Start: one added in the app, one from Claude (the connector asks the app to hold it, `Held.swift`), and one sent straight to a PC (`rq receive` holds it there unless the options say `start_now`). While it waits, its PCs menu chooses who renders it: one PC renders the whole job and doesn't need this Mac; two or more split an animation. This Mac is always on the list: it runs the same `rq.py` in `~/Library/Application Support/BlenderRender/thismac` with its own Blender on Metal. Every cancel and remove is written to `cancel.log`, in that folder and on the PC, with what asked for it.
+Every job waits under Waiting to Start until you press Start: one added in the app, one from Claude (the connector asks the app to hold it, `Held.swift`), and one sent straight to a PC (`rq receive` holds it there unless the options say `start_now`). While it waits, its PCs menu chooses who renders it: one PC renders the whole job and doesn't need this Mac; two or more split an animation. This Mac is always on the list: it runs the same `rq.py` in `~/Library/Application Support/BlenderRender/thismac` with its own Blender on Metal. **Pause All** in the toolbar freezes every render where it is (`rq pause` suspends Blender, so no samples are lost) and starts nothing new until Resume All. It's kept across launches, and a PC that was offline gets it when it's back. It's separate from a PC's own switch in BlenderRender PC. Every cancel and remove is written to `cancel.log`, in that folder and on the PC, with what asked for it.
 
 ## Several PCs
 

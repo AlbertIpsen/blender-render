@@ -75,6 +75,7 @@ final class SplitRun {
     private static let maxBatchFrames = 1000
     private static let busy = "busy with another job"
     private static let off = "switched off on the PC"
+    private static let paused = "paused"
     /// Until a PC has been measured.
     private static let firstBatchFrames = 2
 
@@ -211,7 +212,7 @@ final class SplitRun {
     /// Not started: every PC is on something else. Once frames are in, a pause doesn't move it back.
     private var isWaiting: Bool {
         running && state.framesDone == 0 && !state.batches.contains { $0.status == "running" }
-            && activity.values.allSatisfy { $0 == Self.busy || $0 == Self.off }
+            && activity.values.allSatisfy { $0 == Self.busy || $0 == Self.off || $0 == Self.paused }
     }
 
     /// True while any PC still has frames of this job to render; later jobs wait until then.
@@ -279,6 +280,14 @@ final class SplitRun {
                 if list.off == true {
                     if activity[pc.id] != Self.off {
                         activity[pc.id] = Self.off
+                        changed()
+                    }
+                    try? await Task.sleep(for: .seconds(5))
+                    continue
+                }
+                if list.paused == true && !list.jobs.contains(where: { $0.state == "rendering" }) {
+                    if activity[pc.id] != Self.paused {  // a batch it's rendering shows as paused below
+                        activity[pc.id] = Self.paused
                         changed()
                     }
                     try? await Task.sleep(for: .seconds(5))
@@ -412,7 +421,7 @@ final class SplitRun {
         state.batches[i].jobID = job
         changed()
 
-        var lastHeard = Date()
+        var lastHeard = Date(), wasPaused = false
         while running {
             do {
                 let list = try await rpc.list()
@@ -425,7 +434,15 @@ final class SplitRun {
                 switch found?.state {
                 case "queued", "rendering":
                     batchProgress[i] = found?.progress ?? 0
+                    let paused = found?.paused == true || (list.paused == true && found?.state == "queued")
+                    wasPaused = wasPaused || paused
+                    let now = paused ? Self.paused : "frames \(b.start)–\(b.end)"
+                    if activity[pc.id] != now { activity[pc.id] = now }
                     onChange()
+                case "done" where wasPaused:  // the pause isn't this PC's speed
+                    batchProgress[i] = 1
+                    changed()
+                    return job
                 case "done":
                     let perFrame = Date().timeIntervalSince(sent) / Double(state.frames(in: b))
                     var speeds = state.speeds ?? [:]

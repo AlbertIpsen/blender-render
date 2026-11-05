@@ -141,10 +141,12 @@ struct PCJob: Decodable, Identifiable, Equatable {
     var held: Bool?
     /// Which PC the job is on (PCEntry id), filled in by this app; nil for a split job.
     var pc: String?
+    /// Frozen mid-render by Pause All.
+    var paused: Bool?
 
     /// Seconds left right now, counting down between updates from the PC.
     func secondsLeft(at now: Date = Date()) -> Double? {
-        guard state == "rendering", let eta, let at = eta_at else { return nil }
+        guard state == "rendering", paused != true, let eta, let at = eta_at else { return nil }
         return max(0, eta - (now.timeIntervalSince1970 - at))
     }
 
@@ -190,7 +192,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
 }
 
 /// `off`: switched off for rendering on the PC itself (its tray app); jobs wait until it's back on.
-struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool? }
+/// `paused`: Pause All on this Mac; the render in progress is frozen where it is.
+struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool?; var paused: Bool? }
 
 /// `rq stats`: the GPU fields are missing on a PC without nvidia-smi. VRAM is in MiB.
 struct PCStats: Decodable {
@@ -324,6 +327,8 @@ struct RenderPC {
     func delete(_ id: String, by: String = "app-cleanup") async throws { _ = try await rq(["delete", id, "--by=" + by]) }
     /// Let a job that's held on the PC render.
     func release(_ id: String) async throws { _ = try await rq(["release", id]) }
+    func pause() async throws { _ = try await rq(["pause"]) }
+    func resume() async throws { _ = try await rq(["resume"]) }
 
     func log(_ id: String) async throws -> String {
         struct Reply: Decodable { let log: String }

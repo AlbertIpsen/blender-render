@@ -82,7 +82,7 @@ namespace BlenderRenderPC
     /// What `rq list` says, boiled down for the window and the tray tooltip.
     class QueueState
     {
-        public bool Off, Worker, Reachable;
+        public bool Off, Worker, Reachable, Paused;
         public string Error;
         public Dictionary<string, object> Rendering;
         public int Waiting;
@@ -97,6 +97,7 @@ namespace BlenderRenderPC
                 q.Reachable = true;
                 q.Off = data.TryGetValue("off", out var off) && off is bool b && b;
                 q.Worker = data.TryGetValue("worker", out var w) && w is bool wb && wb;
+                q.Paused = data.TryGetValue("paused", out var pz) && pz is bool pb && pb;
                 foreach (Dictionary<string, object> job in ((System.Collections.ArrayList)data["jobs"]))
                 {
                     var state = job.TryGetValue("state", out var s) ? s as string : null;
@@ -126,7 +127,7 @@ namespace BlenderRenderPC
                         ? $"Rendering frames {Str(Rendering, "start")}–{Str(Rendering, "end")} of {name} (split job)"
                         : $"Rendering {name}";
                 }
-                return Off ? "Switched off" : "Ready for render jobs";
+                return Paused ? "Paused from the Mac" : Off ? "Switched off" : "Ready for render jobs";
             }
         }
 
@@ -140,8 +141,10 @@ namespace BlenderRenderPC
                     parts.Add($"{(int)(Progress * 100)}%");
                     var frame = Str(Rendering, "frame");
                     if (frame != null && Str(Rendering, "mode") == "animation") parts.Add("frame " + frame);
+                    if (Paused) parts.Add("paused from the Mac");
                     if (Off) parts.Add("switches off when this is done");
                 }
+                else if (Paused) parts.Add("Rendering carries on when you choose Resume All on the Mac.");
                 else if (Off) parts.Add("Jobs from the Mac wait until you switch this on.");
                 if (Waiting > 0) parts.Add($"{Waiting} waiting");
                 if (!Reachable) parts.Add("The Mac installs the render queue the first time it connects.");
@@ -256,7 +259,7 @@ namespace BlenderRenderPC
                 last = t.Result;
                 onItem.Checked = !last.Off;
                 onItem.Enabled = last.Reachable;
-                tray.Icon = last.Off ? offIcon : onIcon;
+                tray.Icon = last.Off || last.Paused ? offIcon : onIcon;
                 statusItem.Text = last.Headline;
                 var tip = "BlenderRender PC: " + (last.Rendering != null ? $"{(int)(last.Progress * 100)}% " + last.Headline : last.Headline);
                 tray.Text = tip.Length > 63 ? tip.Substring(0, 62) + "…" : tip;
