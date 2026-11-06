@@ -160,7 +160,7 @@ struct PCCard: View {
         }
     }
 
-    /// What it's doing on one job: its share of a split, and how far it is.
+    /// What it's doing on one job: its share of a split, and how far it is (no samples: frames say enough).
     private func rows(_ job: PCJob) -> [(String, String)] {
         var rows: [(String, String)] = []
         if job.parent != nil, let a = job.start, let b = job.end {
@@ -172,7 +172,6 @@ struct PCCard: View {
             let step = max(1, job.step ?? 1)
             rows.append(("On frame", "\((f - a) / step + 1) of \((b - a) / step + 1) (frame \(f))"))
         }
-        if let s = job.sample, let n = job.samples { rows.append(("Sample", "\(s) of \(n)")) }
         rows.append((job.parent != nil ? "Share done" : "Done", "\(Int((job.progress ?? 0) * 100))%"))
         return rows
     }
