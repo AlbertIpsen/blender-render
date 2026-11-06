@@ -30,10 +30,14 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .automatic) { ConnectionPill() }
                 ToolbarItem(placement: .automatic) {
-                    Toggle(isOn: Binding(get: { state.cfg.shareThisMac }, set: { state.setShareThisMac($0) })) {
-                        Text("Allow Render Jobs")
+                    // Its own box with the words showing: a toolbar hides a bare toggle's label.
+                    HStack(spacing: 8) {
+                        Text("Allow Render Jobs").font(.callout.weight(.medium)).fixedSize()
+                        Toggle("Allow Render Jobs", isOn: Binding(get: { state.cfg.shareThisMac }, set: { state.setShareThisMac($0) }))
+                            .toggleStyle(.switch).controlSize(.mini).labelsHidden()
                     }
-                    .toggleStyle(.switch).controlSize(.small)
+                    .padding(.leading, 10).padding(.trailing, 6).padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.quaternary.opacity(0.6)))
                     .help("Allow this computer to do render jobs: other Macs with BlenderRender on this network can render on this Mac's GPU")
                 }
                 ToolbarItem(placement: .automatic) {
@@ -46,12 +50,14 @@ struct ContentView: View {
                         Label(state.pausedAll ? "Resume All" : "Pause All",
                               systemImage: state.pausedAll ? "play.fill" : "pause.fill")
                     }
+                    .labelStyle(.titleAndIcon)  // a toolbar shows just the icon otherwise
                     .help(state.pausedAll ? "Carry on rendering on every PC, from where each one stopped"
                                           : "Pause rendering on every PC; each one carries on from the same spot when you resume")
                     .disabled(!state.cfg.isConfigured)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { picking.value = true } label: { Label("Add Files", systemImage: "plus") }
+                        .labelStyle(.titleAndIcon)
                         .help("Add .blend files to the render queue")
                         .disabled(!state.cfg.isConfigured)
                 }
