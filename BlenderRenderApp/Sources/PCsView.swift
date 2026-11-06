@@ -61,12 +61,15 @@ struct PCCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            if online { hardware } else if let error = live?.error { offline(error) }
+            if online { facts(machine) } else if let error = live?.error { offline(error) }
             if !active.isEmpty {
                 Divider()
                 ForEach(active) { line($0) }
             }
-            if let history { Text(history).font(.caption).foregroundStyle(.secondary) }
+            if !history.isEmpty {
+                Divider()
+                facts(history)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,15 +77,25 @@ struct PCCard: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5))
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                Circle().fill(color).frame(width: 9, height: 9)
-                Text(pc.name.isEmpty ? version?.host ?? pc.displayName : pc.displayName).font(.headline)
-                Spacer()
-                Text(status).font(.callout.weight(.medium)).foregroundStyle(online ? .primary : .secondary)
+    /// Label and value rows, so every number says what it is.
+    private func facts(_ rows: [(String, String)]) -> some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 3) {
+            ForEach(rows, id: \.0) { label, value in
+                GridRow {
+                    Text(label).foregroundStyle(.secondary)
+                    Text(value).monospacedDigit().textSelection(.enabled)
+                }
             }
-            Text(identity).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+        .font(.caption)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 9, height: 9)
+            Text(pc.name.isEmpty ? version?.host ?? pc.displayName : pc.displayName).font(.headline)
+            Spacer()
+            Text(status).font(.callout.weight(.medium)).foregroundStyle(online ? .primary : .secondary)
         }
     }
 
@@ -100,37 +113,24 @@ struct PCCard: View {
         return active.isEmpty ? "Ready" : "Starting…"
     }
 
-    /// "192.168.1.130 · arthu · Blender 5.2.1 · Main PC"
-    private var identity: String {
-        var parts = [pc.host, pc.user]
-        if let b = version?.blender_version, !b.isEmpty { parts.append("Blender " + b) }
-        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
-    @ViewBuilder private var hardware: some View {
-        let stats = live?.stats
-        let name = stats?.gpu_name ?? version?.gpu ?? ""
-        if !name.isEmpty {
-            Text(Notifier.prettyGPU(name)).font(.callout)
+    /// The computer itself: where it is, its Blender, its graphics card and how busy it is.
+    private var machine: [(String, String)] {
+        var rows: [(String, String)] = []
+        if !pc.host.isEmpty { rows.append(("Address", pc.user.isEmpty ? pc.host : "\(pc.host) (Windows user \(pc.user))")) }
+        if let b = version?.blender_version, !b.isEmpty { rows.append(("Blender", b)) }
+        let s = live?.stats
+        let gpu = s?.gpu_name ?? version?.gpu ?? ""
+        if !gpu.isEmpty { rows.append(("Graphics card", Notifier.prettyGPU(gpu))) }
+        if let load = s?.gpu_load {
+            rows.append(("GPU load", "\(Int(load))%" + (s?.gpu_temp.map { " at \(Int($0.rounded())) °C" } ?? "")))
         }
-        if let text = Self.meters(stats) {
-            Text(text).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+        if let u = s?.vram_used, let t = s?.vram_total {
+            rows.append(("Video memory", String(format: "%.1f of %.1f GB in use", u / 1024, t / 1024)))
         }
-    }
-
-    /// "GPU 87% · 64 °C · VRAM 12.1 of 24.0 GB · 1.3 TB free"
-    static func meters(_ s: PCStats?) -> String? {
-        guard let s else { return nil }
-        var parts: [String] = []
-        if let v = s.gpu_load { parts.append("GPU \(Int(v))%") }
-        if let v = s.gpu_temp { parts.append("\(Int(v.rounded())) °C") }
-        if let u = s.vram_used, let t = s.vram_total {
-            parts.append(String(format: "VRAM %.1f of %.1f GB", u / 1024, t / 1024))
+        if let d = s?.disk_free {
+            rows.append(("Free disk", ByteCountFormatter.string(fromByteCount: Int64(d), countStyle: .file)))
         }
-        if let v = s.disk_free {
-            parts.append(ByteCountFormatter.string(fromByteCount: Int64(v), countStyle: .file) + " free")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return rows
     }
 
     private func offline(_ error: String) -> some View {
@@ -144,9 +144,10 @@ struct PCCard: View {
     }
 
     private func line(_ job: PCJob) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(job.displayName).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Text((job.state == "rendering" ? "Rendering " : "Next: ") + job.displayName)
+                    .font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if let left = job.secondsLeft().flatMap(PCJob.timeLeft) {
                     Text(left).font(.caption).monospacedDigit().foregroundStyle(.secondary)
@@ -155,27 +156,40 @@ struct PCCard: View {
             if job.state == "rendering" {
                 ProgressView(value: job.progress ?? 0)
             }
-            Text(detail(job)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            facts(rows(job))
         }
     }
 
-    private func detail(_ job: PCJob) -> String {
-        let batch = job.parent == nil ? "" : "Split batch, frames \(job.start ?? 0)–\(job.end ?? 0) · "
-        return batch + (job.state == "rendering" ? job.progressText : "Waiting")
+    /// What it's doing on one job: its share of a split, and how far it is.
+    private func rows(_ job: PCJob) -> [(String, String)] {
+        var rows: [(String, String)] = []
+        if job.parent != nil, let a = job.start, let b = job.end {
+            let n = (b - a) / max(1, job.step ?? 1) + 1
+            rows.append(("Its share", "frames \(a)–\(b) of the split job (\(n) frame\(n == 1 ? "" : "s"))"))
+        }
+        guard job.state == "rendering" else { return rows + [("Status", "waiting for the job before it")] }
+        if job.mode == "animation", let f = job.frame, let a = job.start, let b = job.end {
+            let step = max(1, job.step ?? 1)
+            rows.append(("On frame", "\((f - a) / step + 1) of \((b - a) / step + 1) (frame \(f))"))
+        }
+        if let s = job.sample, let n = job.samples { rows.append(("Sample", "\(s) of \(n)")) }
+        rows.append((job.parent != nil ? "Share done" : "Done", "\(Int((job.progress ?? 0) * 100))%"))
+        return rows
     }
 
-    /// "3 finished · 1 failed · 120 frames done here (12 split batches)"
-    private var history: String? {
+    /// Its record: frames it has done for the running split, its speed there, and jobs it has finished.
+    private var history: [(String, String)] {
+        var rows: [(String, String)] = []
+        if splitDone.batches > 0 {
+            rows.append(("Done for this split", "\(splitDone.frames) frame\(splitDone.frames == 1 ? "" : "s") in \(splitDone.batches) batch\(splitDone.batches == 1 ? "" : "es")"))
+        }
+        if let speed { rows.append(("Speed", String(format: "%.1f s per frame", speed))) }
         let jobs = (live?.jobs ?? []).filter { $0.parent == nil }
         let done = jobs.filter { $0.state == "done" }.count, failed = jobs.filter { $0.state == "failed" }.count
-        var parts: [String] = []
-        if done > 0 { parts.append("\(done) finished") }
-        if failed > 0 { parts.append("\(failed) failed") }
-        if splitDone.batches > 0 {
-            parts.append("\(splitDone.frames) frame\(splitDone.frames == 1 ? "" : "s") done here (\(splitDone.batches) split \(splitDone.batches == 1 ? "batch" : "batches"))")
+        if done + failed > 0 {
+            rows.append(("Jobs finished here", "\(done)" + (failed > 0 ? " (\(failed) failed)" : "")))
         }
-        if let speed { parts.append(String(format: "%.1f s per frame", speed)) }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return rows
     }
 }
 
