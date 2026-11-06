@@ -27,9 +27,6 @@ struct PCCards: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            ShareToggle(isOn: Binding(get: { state.cfg.shareThisMac }, set: { state.setShareThisMac($0) }))
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
                        batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id))

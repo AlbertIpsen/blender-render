@@ -30,6 +30,13 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .automatic) { ConnectionPill() }
                 ToolbarItem(placement: .automatic) {
+                    Toggle(isOn: Binding(get: { state.cfg.shareThisMac }, set: { state.setShareThisMac($0) })) {
+                        Text("Allow Render Jobs")
+                    }
+                    .toggleStyle(.switch).controlSize(.small)
+                    .help("Allow this computer to do render jobs: other Macs with BlenderRender on this network can render on this Mac's GPU")
+                }
+                ToolbarItem(placement: .automatic) {
                     Toggle(isOn: $showPCs) { Label("Render PCs", systemImage: "sidebar.right") }
                         .help(showPCs ? "Hide the render PCs" : "Show what each render PC is doing")
                         .disabled(!state.cfg.isConfigured)
@@ -57,9 +64,11 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     if state.update != nil { UpdateBanner() }
                     if state.pausedAll { PausedBanner() }
+                    if state.cfg.shareThisMac { SharingBar() }
                 }
             }
             .animation(uiAnimation(reduceMotion), value: state.pausedAll)
+            .animation(uiAnimation(reduceMotion), value: state.cfg.shareThisMac)
             .animation(uiAnimation(reduceMotion), value: state.update)
             .navigationTitle("BlenderRender")
             .navigationSubtitle(state.summary)
@@ -132,6 +141,47 @@ struct PausedBanner: View {
     }
 }
 
+/// This Mac allows render jobs: standby, or what it renders for which Mac, and who's connected.
+struct SharingBar: View {
+    @EnvironmentObject var state: AppState
+
+    private var job: PCJob? { state.sharing.jobs.first }
+    private var rendering: Bool { job?.state == "rendering" }
+
+    private var headline: String {
+        guard let job else { return "Standby: ready for render jobs from other Macs" }
+        guard rendering else { return "\(state.sharing.jobs.count) job\(state.sharing.jobs.count == 1 ? "" : "s") from other Macs waiting" }
+        let what = job.parent != nil ? "frames \(job.start ?? 0)–\(job.end ?? 0) of \(job.displayName)" : job.displayName
+        return "Rendering \(what)" + (job.from.map { " for \($0)" } ?? "")
+    }
+
+    private var detail: String {
+        var parts: [String] = []
+        if rendering, let job { parts.append(job.progressText) }
+        let waiting = state.sharing.jobs.filter { $0.state == "queued" }.count
+        if rendering && waiting > 0 { parts.append("\(waiting) waiting") }
+        parts.append(state.sharing.connected.isEmpty ? "No other Mac connected right now"
+                                                     : "Connected: " + state.sharing.connected.joined(separator: ", "))
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: rendering ? "cpu.fill" : "checkmark.circle")
+                .foregroundStyle(rendering ? Color.accentColor : .green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(headline).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            if rendering, let job { ProgressView(value: job.progress ?? 0).frame(width: 120) }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
 struct DropOverlay: View {
     let host: String
 
@@ -189,7 +239,7 @@ struct SetUpPCView: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.5)))
             }
             Button("Set Up a New PC") { state.showGuide = true }.buttonStyle(.borderedProminent).controlSize(.large)
-            Button("Add a PC by Address – Open Settings") { openSettings() }.buttonStyle(.link)
+            Button("Open Settings") { openSettings() }.buttonStyle(.link)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

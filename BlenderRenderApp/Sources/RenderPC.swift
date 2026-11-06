@@ -174,6 +174,8 @@ struct PCJob: Decodable, Identifiable, Equatable {
     var pc: String?
     /// Frozen mid-render by Pause All.
     var paused: Bool?
+    /// The Mac that sent it (its name), as rq.py recorded it.
+    var from: String?
 
     /// Seconds left right now, counting down between updates from the PC.
     func secondsLeft(at now: Date = Date()) -> Double? {
@@ -225,7 +227,12 @@ struct PCJob: Decodable, Identifiable, Equatable {
 /// `off`: switched off for rendering on the PC itself (its tray app); jobs wait until it's back on.
 /// `paused`: Pause All on this Mac; the render in progress is frozen where it is.
 /// `share`: lets other BlenderRender computers send it jobs (always on for a PC set up from its own app).
-struct PCList: Decodable { let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool?; var paused: Bool?; var share: Bool? }
+/// `clients`: Macs that used the queue lately, with when (`seen`, by the queue's clock `now`).
+struct PCList: Decodable {
+    let jobs: [PCJob]; let worker: Bool; let gpu: String?; var off: Bool?; var paused: Bool?; var share: Bool?
+    var clients: [Client]?; var now: Double?
+    struct Client: Decodable { let name: String; let seen: Double }
+}
 
 /// `rq stats`: the GPU fields are missing on a PC without nvidia-smi. VRAM is in MiB.
 struct PCStats: Decodable {

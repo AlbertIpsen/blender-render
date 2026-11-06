@@ -98,7 +98,8 @@ final class AppState: ObservableObject {
         if !waitingToStart.isEmpty { parts.append("\(waitingToStart.count) to start") }
         let ready = finished.filter { $0.state == "done" && downloaded[$0.id] == nil }.count
         if ready > 0 { parts.append("\(ready) ready to download") }
-        return parts.isEmpty ? (cfg.isConfigured ? "Queue is empty" : "Not connected") : parts.joined(separator: " · ")
+        return parts.isEmpty ? (cfg.isConfigured ? "Queue is empty" : cfg.shareThisMac ? "Takes render jobs from other Macs" : "Not connected")
+                             : parts.joined(separator: " · ")
     }
     var finished: [PCJob] { jobs.filter { !$0.isActive && $0.state != "held" }.sorted { ($0.ended ?? $0.submitted ?? 0) > ($1.ended ?? $1.submitted ?? 0) } }
 
@@ -329,6 +330,13 @@ final class AppState: ObservableObject {
     }
 
     /// The PC holding this job.
+    // MARK: Rendering for other Macs
+
+    /// What This Mac does for other Macs, when it allows render jobs: who's connected (heard from in the
+    /// last minute) and their jobs in its queue, the one rendering first.
+    struct Sharing: Equatable { var connected: [String] = []; var jobs: [PCJob] = [] }
+    @Published private(set) var sharing = Sharing()
+
     // MARK: Computers on the network
 
     /// Switched off on the PC, or (found on the network) not taking jobs from other computers.
@@ -476,7 +484,14 @@ final class AppState: ObservableObject {
             pcVersions[id]?.off = Self.isOff(list, cfg.allPCs.first { $0.id == id })
             keepWorker(id, list)
             syncPause(id, reported: list.paused == true)
-            let jobs = list.jobs
+            var jobs = list.jobs
+            if id == "mac" {  // other Macs' jobs on This Mac show in the sharing bar, not in this Mac's own list
+                let me = RenderPC.fromName, now = list.now ?? Date().timeIntervalSince1970
+                let theirs = jobs.filter { $0.from != nil && $0.from != me }
+                sharing = Sharing(connected: (list.clients ?? []).filter { $0.name != me && now - $0.seen < 60 }.map(\.name),
+                                  jobs: theirs.filter(\.isActive).sorted { ($0.state == "rendering" ? 0 : 1) < ($1.state == "rendering" ? 0 : 1) })
+                jobs.removeAll { j in theirs.contains { $0.id == j.id } }
+            }
             jobsByPC[id] = jobs.filter { $0.parent == nil }.map { var j = $0; j.pc = id; return j }
         }
         for id in jobsByPC.keys where !others.contains(where: { $0.id == id }) { jobsByPC[id] = nil }
