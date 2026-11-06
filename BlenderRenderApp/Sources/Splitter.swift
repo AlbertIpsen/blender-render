@@ -69,7 +69,7 @@ final class SplitRun {
     /// How long a PC may stay silent before its batch goes to another PC.
     private static let silenceLimit = 120.0
     /// How long a batch should keep a PC busy: longer saves reloading the file, shorter shares more evenly.
-    private static let batchSeconds = 300.0
+    private static let batchSeconds = 600.0
     /// Only light scenes reach this; it keeps one batch's frames to a sensible copy back to the Mac.
     /// At 0.2 s a frame, 60 was mostly opening the file and copying, not rendering.
     private static let maxBatchFrames = 1000
@@ -251,13 +251,16 @@ final class SplitRun {
         // The PC starts its next batch while the last one's frames copy back; over Wi-Fi the copy
         // can take as long as the render. One copy at a time per PC.
         var copy: Task<Void, Never>?
+        // Its next batch, sent while the last one was nearly done, so it starts the moment that ends:
+        // no idle GPU while the Mac notices, sends the next and the PC picks it up.
+        var ahead: (i: Int, job: String)?
         defer { activity[pc.id] = nil }
         while running && !allDone && !Task.isCancelled {
-            guard state.batches.contains(where: { $0.status == "pending" }) else {
+            guard ahead != nil || state.batches.contains(where: { $0.status == "pending" }) else {
                 try? await Task.sleep(for: .seconds(3))  // another PC might still hand one back
                 continue
             }
-            guard !workAhead(pc) else {  // a PC does one job at a time, in queue order; this one doesn't even need the file yet
+            guard ahead != nil || !workAhead(pc) else {  // a PC does one job at a time, in queue order; this one doesn't even need the file yet
                 activity[pc.id] = nil
                 onChange()
                 try? await Task.sleep(for: .seconds(3))
@@ -280,6 +283,11 @@ final class SplitRun {
                 // Pull, don't push: a batch queued behind other work would sit there while other PCs go idle.
                 let list = try await rpc.list()
                 if list.off == true {
+                    if let a = ahead, list.jobs.first(where: { $0.id == a.job })?.state != "rendering" {
+                        try? await rpc.delete(a.job)  // switched off: that one goes to another PC
+                        release(a.i)
+                        ahead = nil
+                    }
                     if activity[pc.id] != Self.off {
                         activity[pc.id] = Self.off
                         changed()
@@ -295,7 +303,7 @@ final class SplitRun {
                     try? await Task.sleep(for: .seconds(5))
                     continue
                 }
-                if list.jobs.contains(where: \.isActive) {
+                if list.jobs.contains(where: { $0.isActive && $0.id != ahead?.job }) {
                     if activity[pc.id] != Self.busy {
                         activity[pc.id] = Self.busy
                         changed()
@@ -303,9 +311,23 @@ final class SplitRun {
                     try? await Task.sleep(for: .seconds(5))
                     continue
                 }
-                guard running, let i = nextBatch(for: pc) else { continue }
+                let i: Int, queued: String?
+                if let a = ahead {
+                    (i, queued) = (a.i, a.job)
+                    ahead = nil
+                } else {
+                    guard running, let n = nextBatch(for: pc) else { continue }
+                    (i, queued) = (n, nil)
+                }
                 do {
-                    let job = try await render(i, on: rpc, pc: pc)
+                    let job = try await render(i, on: rpc, pc: pc, queued: queued) {
+                        guard ahead == nil, self.running, let n = self.nextBatch(for: pc) else { return }
+                        do {
+                            if let next = try await self.submit(n, on: rpc, pc: pc) { ahead = (n, next) }
+                        } catch {
+                            self.release(n)  // it goes the usual way once this batch is done
+                        }
+                    }
                     failures = 0
                     activity[pc.id] = nil
                     await copy?.value
@@ -397,24 +419,27 @@ final class SplitRun {
         state.error = reason
         state.ended = Date().timeIntervalSince1970
         note(reason)
-        for pc in state.pcs { let rpc = rpc(pc), id = state.id; Task { try? await rpc.cacheDrop(id) } }
+        for pc in state.pcs { let rpc = rpc(pc), jobs = state.batches.filter { $0.pc == pc.id && $0.status == "running" }.compactMap(\.jobID), id = state.id
+            Task {
+                for job in jobs { try? await rpc.delete(job, by: "split-failed") }  // a batch queued ahead, say
+                try? await rpc.cacheDrop(id)
+            }
+        }
         cleanUp(keepBlend: true)
         changed()
     }
 
-    /// Renders batch `i` on the PC; returns the PC's job id once it's done, nil if the split was cancelled.
-    private func render(_ i: Int, on rpc: RenderPC, pc: PCEntry) async throws -> String? {
+    /// Queue batch `i` on the PC; its job id, or nil if the split was cancelled meanwhile.
+    private func submit(_ i: Int, on rpc: RenderPC, pc: PCEntry) async throws -> String? {
         let b = state.batches[i]
         state.batches[i].status = "running"
         state.batches[i].pc = pc.id
-        activity[pc.id] = "frames \(b.start)–\(b.end)"
         changed()
         var opts: [String: Any] = ["name": state.name, "mode": "animation", "start": b.start, "end": b.end,
                                    "pct": state.pct, "samples": state.samples, "step": state.step,
                                    "frames_only": true, "parent": state.id, "blend": state.id]
         if state.fast { opts["fast"] = true }
         if !cfg.keepAwake { opts["keep_awake"] = false }
-        let sent = Date()
         let job = try await rpc.submitBatch(options: opts)
         guard running else {  // cancelled while this was on its way, so cancel() didn't know its id
             try? await rpc.delete(job)
@@ -422,8 +447,25 @@ final class SplitRun {
         }
         state.batches[i].jobID = job
         changed()
+        return job
+    }
 
-        var lastHeard = Date(), wasPaused = false
+    /// Renders batch `i` on the PC (sending it, unless it's `queued` there already); returns the PC's
+    /// job id once it's done, nil if the split was cancelled. `nearlyDone` runs once, about a minute
+    /// before the end, to queue the PC's next batch.
+    private func render(_ i: Int, on rpc: RenderPC, pc: PCEntry, queued: String?,
+                        nearlyDone: () async -> Void) async throws -> String? {
+        let b = state.batches[i]
+        activity[pc.id] = "frames \(b.start)–\(b.end)"
+        changed()
+        let sent = Date()
+        let job: String
+        if let queued { job = queued } else {
+            guard let submitted = try await submit(i, on: rpc, pc: pc) else { return nil }
+            job = submitted
+        }
+
+        var lastHeard = Date(), wasPaused = false, askedForNext = false
         while running {
             do {
                 let list = try await rpc.list()
@@ -441,12 +483,19 @@ final class SplitRun {
                     let now = paused ? Self.paused : "frames \(b.start)–\(b.end)"
                     if activity[pc.id] != now { activity[pc.id] = now }
                     onChange()
+                    if !askedForNext, !paused, found?.state == "rendering",
+                       (found?.eta).map({ $0 < 90 }) ?? false || (found?.progress ?? 0) > 0.85 {
+                        askedForNext = true
+                        await nearlyDone()
+                    }
                 case "done" where wasPaused:  // the pause isn't this PC's speed
                     batchProgress[i] = 1
                     changed()
                     return job
                 case "done":
-                    let perFrame = Date().timeIntervalSince(sent) / Double(state.frames(in: b))
+                    // The PC's own start and end: a batch queued ahead waited before it started.
+                    let took = found.flatMap { j in j.started.flatMap { s in j.ended.map { $0 - s } } } ?? Date().timeIntervalSince(sent)
+                    let perFrame = took / Double(state.frames(in: b))
                     var speeds = state.speeds ?? [:]
                     speeds[pc.id] = speeds[pc.id].map { ($0 + perFrame) / 2 } ?? perFrame
                     state.speeds = speeds
