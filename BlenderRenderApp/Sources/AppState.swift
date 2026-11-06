@@ -263,10 +263,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Batches of running split jobs this PC has finished.
-    func splitBatchesDone(on id: String) -> Int {
-        splits.runs.filter { $0.state.state == "rendering" }
-            .reduce(0) { $0 + $1.state.batches.filter { $0.pc == id && $0.status == "done" }.count }
+    /// Batches of running split jobs this PC has finished, and the frames in them.
+    func splitDone(on id: String) -> (batches: Int, frames: Int) {
+        splits.runs.filter { $0.state.state == "rendering" }.reduce((0, 0)) { total, run in
+            let done = run.state.batches.filter { $0.pc == id && $0.status == "done" }
+            return (total.0 + done.count, total.1 + done.reduce(0) { $0 + run.state.frames(in: $1) })
+        }
     }
 
     /// Seconds per frame this PC is managing on a running split job.

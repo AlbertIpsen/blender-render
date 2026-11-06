@@ -29,7 +29,7 @@ struct PCCards: View {
         VStack(spacing: 12) {
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
-                       batchesDone: state.splitBatchesDone(on: pc.id), speed: state.splitSpeed(on: pc.id))
+                       splitDone: state.splitDone(on: pc.id), speed: state.splitSpeed(on: pc.id))
             }
             if !state.nearbyToAdd.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -49,7 +49,7 @@ struct PCCard: View {
     let pc: PCEntry
     let version: PCVersion?
     let live: PCLive?
-    let batchesDone: Int
+    let splitDone: (batches: Int, frames: Int)
     let speed: Double?
 
     private var online: Bool { version != nil && live?.error == nil }
@@ -164,14 +164,16 @@ struct PCCard: View {
         return batch + (job.state == "rendering" ? job.progressText : "Waiting")
     }
 
-    /// "3 finished · 1 failed · 12 split batches done here"
+    /// "3 finished · 1 failed · 120 frames done here (12 split batches)"
     private var history: String? {
         let jobs = (live?.jobs ?? []).filter { $0.parent == nil }
         let done = jobs.filter { $0.state == "done" }.count, failed = jobs.filter { $0.state == "failed" }.count
         var parts: [String] = []
         if done > 0 { parts.append("\(done) finished") }
         if failed > 0 { parts.append("\(failed) failed") }
-        if batchesDone > 0 { parts.append("\(batchesDone) split \(batchesDone == 1 ? "batch" : "batches") done here") }
+        if splitDone.batches > 0 {
+            parts.append("\(splitDone.frames) frame\(splitDone.frames == 1 ? "" : "s") done here (\(splitDone.batches) split \(splitDone.batches == 1 ? "batch" : "batches"))")
+        }
         if let speed { parts.append(String(format: "%.1f s per frame", speed)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
