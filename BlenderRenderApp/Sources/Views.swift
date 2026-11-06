@@ -486,9 +486,10 @@ struct JobRow: View {
                         .animation(.ui, value: job.progress ?? 0)
                     // Time left leads (it's what you want to know); ticks every second between PC updates.
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                        Text(job.timeLeftText(at: ctx.date) ?? (job.mode == "animation" && (job.frame ?? 0) <= (job.start ?? 1)
-                                                                ? "Estimating time left after the first frame…"
-                                                                : "Estimating time left…"))
+                        Text("\(Int(((job.progress ?? 0) * 100).rounded(.down)))% · "
+                             + (job.timeLeftText(at: ctx.date) ?? (job.mode == "animation" && (job.frame ?? 0) <= (job.start ?? 1)
+                                                                   ? "Estimating time left after the first frame…"
+                                                                   : "Estimating time left…")))
                             .font(.callout.weight(.medium)).monospacedDigit()
                             .contentTransition(.numericText())
                     }
