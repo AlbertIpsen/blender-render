@@ -49,7 +49,8 @@ struct PCCard: View {
     let pc: PCEntry
     let version: PCVersion?
     let live: PCLive?
-    let splitDone: (batches: Int, frames: Int)
+    /// Batches and frames it has finished, by running split job (a batch's `parent`).
+    let splitDone: [String: (batches: Int, frames: Int)]
     let speed: Double?
 
     private var online: Bool { version != nil && live?.error == nil }
@@ -163,31 +164,35 @@ struct PCCard: View {
     /// What it's doing on one job: its share of a split, and how far it is (no samples: frames say enough).
     private func rows(_ job: PCJob) -> [(String, String)] {
         var rows: [(String, String)] = []
-        if job.parent != nil, let a = job.start, let b = job.end {
-            let n = (b - a) / max(1, job.step ?? 1) + 1
-            rows.append(("Its share", "frames \(a)–\(b) of the split job (\(n) frame\(n == 1 ? "" : "s"))"))
+        if let parent = job.parent {
+            let d = splitDone[parent] ?? (0, 0)
+            rows.append(("Rendered here", d.frames == 0 ? "no frames of this job yet"
+                         : "\(d.frames) frame\(d.frames == 1 ? "" : "s") of this job (\(d.batches) batch\(d.batches == 1 ? "" : "es"))"))
+            if let a = job.start, let b = job.end {
+                let n = (b - a) / max(1, job.step ?? 1) + 1
+                rows.append(("Working on", "frames \(a)–\(b) (\(n) frame\(n == 1 ? "" : "s"))"))
+            }
+        } else if job.state == "rendering", job.mode == "animation", let a = job.start, let b = job.end {
+            rows.append(("Rendered here", "\(job.saved ?? 0) of \((b - a) / max(1, job.step ?? 1) + 1) frames"))
         }
         guard job.state == "rendering" else { return rows + [("Status", "waiting for the job before it")] }
         if job.mode == "animation", let f = job.frame, let a = job.start, let b = job.end {
             let step = max(1, job.step ?? 1)
             rows.append(("On frame", "\((f - a) / step + 1) of \((b - a) / step + 1) (frame \(f))"))
         }
-        rows.append((job.parent != nil ? "Share done" : "Done", "\(Int((job.progress ?? 0) * 100))%"))
+        rows.append((job.parent != nil ? "Batch done" : "Done", "\(Int((job.progress ?? 0) * 100))%"))
         return rows
     }
 
-    /// Its record: frames it has done for the running split, its speed there, and jobs it has finished.
+    /// Its record for the running split: frames done (when no batch of it is on now) and its speed.
     private var history: [(String, String)] {
         var rows: [(String, String)] = []
-        if splitDone.batches > 0 {
-            rows.append(("Done for this split", "\(splitDone.frames) frame\(splitDone.frames == 1 ? "" : "s") in \(splitDone.batches) batch\(splitDone.batches == 1 ? "" : "es")"))
+        // Between batches the job rows above are gone: say what it has done for the split here instead.
+        let total = splitDone.values.reduce(0) { $0 + $1.frames }
+        if total > 0 && !active.contains(where: { $0.parent != nil }) {
+            rows.append(("Rendered here", "\(total) frame\(total == 1 ? "" : "s") of the running split job"))
         }
         if let speed { rows.append(("Speed", String(format: "%.1f s per frame", speed))) }
-        let jobs = (live?.jobs ?? []).filter { $0.parent == nil }
-        let done = jobs.filter { $0.state == "done" }.count, failed = jobs.filter { $0.state == "failed" }.count
-        if done + failed > 0 {
-            rows.append(("Jobs finished here", "\(done)" + (failed > 0 ? " (\(failed) failed)" : "")))
-        }
         return rows
     }
 }
