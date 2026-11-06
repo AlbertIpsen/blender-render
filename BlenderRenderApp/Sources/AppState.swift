@@ -130,6 +130,11 @@ final class AppState: ObservableObject {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        if let failed = Updater.failedUpdate() {
+            alert = "BlenderRender \(failed.version) didn't install, so this is still \(Updater.currentVersion).\n\n"
+                + (failed.why.isEmpty ? "" : failed.why + "\n\n")
+                + "Move BlenderRender to your Applications folder, open it from there, and update again."
+        }
         Task { [weak self] in
             while !Task.isCancelled {
                 self?.checkForUpdates(manual: false)
