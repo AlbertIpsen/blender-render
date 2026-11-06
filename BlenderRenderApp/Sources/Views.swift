@@ -70,7 +70,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     if state.update != nil { UpdateBanner() }
                     if state.pausedAll { PausedBanner() }
-                    if state.cfg.shareThisMac { SharingBar() }
+                    if state.cfg.shareThisMac && !state.isRenderMachine { SharingBar() }  // a render machine's window says it all
                 }
             }
             .animation(uiAnimation(reduceMotion), value: state.pausedAll)
@@ -97,7 +97,9 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if !state.cfg.isConfigured {
+        if state.isRenderMachine {
+            RenderMachineView()
+        } else if !state.cfg.isConfigured {
             SetUpPCView()
         } else if state.uploads.isEmpty && state.jobs.isEmpty {
             EmptyQueueView(choose: { picking.value = true })
@@ -127,6 +129,34 @@ struct UpdateBanner: View {
     }
 }
 
+/// A Mac that only renders for others: what it's doing, in place of the setup screen.
+struct RenderMachineView: View {
+    @EnvironmentObject var state: AppState
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: state.sharing.rendering ? "cpu.fill" : "desktopcomputer")
+                .font(.system(size: 40)).foregroundStyle(state.sharing.rendering ? Color.accentColor : .secondary)
+            Text("This Mac Is a Render Machine").font(.title2.weight(.semibold))
+            VStack(spacing: 6) {
+                Text(state.sharing.headline).font(.headline).multilineTextAlignment(.center)
+                if state.sharing.rendering, let job = state.sharing.job {
+                    ProgressView(value: job.progress ?? 0).frame(width: 320)
+                    Text(job.progressText).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                }
+                Text(state.sharing.connectedText).font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 460)
+            Text("Other Macs with BlenderRender on this network send it render jobs. Switch off Allow Render Jobs in the toolbar to stop.")
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+            Button("Render your own files too: add render computers…") { openSettings() }.buttonStyle(.link)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 /// Pause All is on: easy to forget, so it stays in sight until resumed.
 struct PausedBanner: View {
     @EnvironmentObject var state: AppState
@@ -151,25 +181,10 @@ struct PausedBanner: View {
 struct SharingBar: View {
     @EnvironmentObject var state: AppState
 
-    private var job: PCJob? { state.sharing.jobs.first }
-    private var rendering: Bool { job?.state == "rendering" }
-
-    private var headline: String {
-        guard let job else { return "Standby: ready for render jobs from other Macs" }
-        guard rendering else { return "\(state.sharing.jobs.count) job\(state.sharing.jobs.count == 1 ? "" : "s") from other Macs waiting" }
-        let what = job.parent != nil ? "frames \(job.start ?? 0)–\(job.end ?? 0) of \(job.displayName)" : job.displayName
-        return "Rendering \(what)" + (job.from.map { " for \($0)" } ?? "")
-    }
-
-    private var detail: String {
-        var parts: [String] = []
-        if rendering, let job { parts.append(job.progressText) }
-        let waiting = state.sharing.jobs.filter { $0.state == "queued" }.count
-        if rendering && waiting > 0 { parts.append("\(waiting) waiting") }
-        parts.append(state.sharing.connected.isEmpty ? "No other Mac connected right now"
-                                                     : "Connected: " + state.sharing.connected.joined(separator: ", "))
-        return parts.joined(separator: " · ")
-    }
+    private var job: PCJob? { state.sharing.job }
+    private var rendering: Bool { state.sharing.rendering }
+    private var headline: String { state.sharing.headline }
+    private var detail: String { state.sharing.detail }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -303,6 +318,7 @@ struct ConnectionPill: View {
     }
     private var short: String {
         switch state.status {
+        case .online where state.isRenderMachine: return state.sharing.rendering ? "Rendering" : "Render Machine"
         case .online: return state.rendering.isEmpty ? "Ready to Render" : "Rendering"
         case .connecting: return "Connecting…"
         case .offline: return "Offline"
@@ -319,6 +335,8 @@ struct ConnectionPill: View {
     }
     private var detail: String {
         switch state.status {
+        case .online where state.isRenderMachine:
+            return "Other Macs with BlenderRender on this network send this Mac render jobs.\n" + state.sharing.connectedText
         case .online: return "Each job renders on the computers you switch on for it."
         case .connecting: return "Checking your render computers."
         case .offline(let why): return why + "\n\nAre they on, awake and logged in?"

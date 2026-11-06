@@ -98,7 +98,7 @@ final class AppState: ObservableObject {
         if !waitingToStart.isEmpty { parts.append("\(waitingToStart.count) to start") }
         let ready = finished.filter { $0.state == "done" && downloaded[$0.id] == nil }.count
         if ready > 0 { parts.append("\(ready) ready to download") }
-        return parts.isEmpty ? (cfg.isConfigured ? "Queue is empty" : cfg.shareThisMac ? "Takes render jobs from other Macs" : "Not connected")
+        return parts.isEmpty ? (cfg.isConfigured ? "Queue is empty" : cfg.shareThisMac ? "Render machine for other Macs" : "Not connected")
                              : parts.joined(separator: " · ")
     }
     var finished: [PCJob] { jobs.filter { !$0.isActive && $0.state != "held" }.sorted { ($0.ended ?? $0.submitted ?? 0) > ($1.ended ?? $1.submitted ?? 0) } }
@@ -344,8 +344,39 @@ final class AppState: ObservableObject {
 
     /// What This Mac does for other Macs, when it allows render jobs: who's connected (heard from in the
     /// last minute) and their jobs in its queue, the one rendering first.
-    struct Sharing: Equatable { var connected: [String] = []; var jobs: [PCJob] = [] }
+    struct Sharing: Equatable {
+        var connected: [String] = []
+        var jobs: [PCJob] = []
+
+        var job: PCJob? { jobs.first }
+        var rendering: Bool { job?.state == "rendering" }
+
+        /// "Standby: …" or "Rendering frames 3–4 of X for Albert's Mac mini".
+        var headline: String {
+            guard let job else { return "Standby: ready for render jobs from other Macs" }
+            guard rendering else { return "\(jobs.count) job\(jobs.count == 1 ? "" : "s") from other Macs waiting" }
+            let what = job.parent != nil ? "frames \(job.start ?? 0)–\(job.end ?? 0) of \(job.displayName)" : job.displayName
+            return "Rendering \(what)" + (job.from.map { " for \($0)" } ?? "")
+        }
+
+        /// "Frame 2 of 7 · 31% · Connected: Albert's Mac mini"
+        var detail: String {
+            var parts: [String] = []
+            if rendering, let job { parts.append(job.progressText) }
+            let waiting = jobs.filter { $0.state == "queued" }.count
+            if rendering && waiting > 0 { parts.append("\(waiting) waiting") }
+            parts.append(connectedText)
+            return parts.joined(separator: " · ")
+        }
+
+        var connectedText: String {
+            connected.isEmpty ? "No other Mac connected right now" : "Connected: " + connected.joined(separator: ", ")
+        }
+    }
     @Published private(set) var sharing = Sharing()
+
+    /// Renders only for other Macs: no render computers of its own, Allow Render Jobs on.
+    var isRenderMachine: Bool { !cfg.isConfigured && cfg.shareThisMac }
 
     // MARK: Computers on the network
 
@@ -518,7 +549,10 @@ final class AppState: ObservableObject {
             downloaded[id] = path
         }
         let pool = cfg.extraPCs
-        guard !pool.isEmpty else { status = .notConfigured; return 2 }
+        guard !pool.isEmpty else {
+            status = cfg.shareThisMac ? .online(host: "Render machine for other Macs", gpu: "", worker: true) : .notConfigured
+            return 2
+        }
         let answering = pool.filter { Date().timeIntervalSince(pcSeen[$0.id] ?? .distantPast) < 15 }
         let gpus = answering.compactMap { pcVersions[$0.id]?.gpu }.filter { !$0.isEmpty }
         if answering.isEmpty {
