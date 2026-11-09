@@ -40,16 +40,6 @@ struct ContentView: View {
                     .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.quaternary.opacity(0.6)))
                     .help("Allow this computer to do render jobs: other Macs with BlenderRender on this network can render on this Mac's GPU")
                 }
-                ToolbarItem(placement: .automatic) {
-                    Button { state.setPausedAll(!state.pausedAll) } label: {
-                        Label(state.pausedAll ? "Resume All" : "Pause All",
-                              systemImage: state.pausedAll ? "play.fill" : "pause.fill")
-                    }
-                    .labelStyle(.titleAndIcon)  // a toolbar shows just the icon otherwise
-                    .help(state.pausedAll ? "Carry on rendering on every PC, from where each one stopped"
-                                          : "Pause rendering on every PC; each one carries on from the same spot when you resume")
-                    .disabled(!state.cfg.isConfigured)
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { picking.value = true } label: { Label("Add Files", systemImage: "plus") }
                         .labelStyle(.titleAndIcon)
@@ -511,7 +501,7 @@ struct JobRow: View {
                     // Time left leads (it's what you want to know); ticks every second between PC updates.
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
                         Text("\(Int(((job.progress ?? 0) * 100).rounded(.down)))% · "
-                             + (job.timeLeftText(at: ctx.date) ?? (job.mode == "animation" && (job.frame ?? 0) <= (job.start ?? 1)
+                             + (job.paused == true ? "Paused" : job.timeLeftText(at: ctx.date) ?? (job.mode == "animation" && (job.frame ?? 0) <= (job.start ?? 1)
                                                                    ? "Estimating time left after the first frame…"
                                                                    : "Estimating time left…")))
                             .font(.callout.weight(.medium)).monospacedDigit()
@@ -533,7 +523,10 @@ struct JobRow: View {
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering.value = h } }
         .contextMenu {
             if job.state == "held" { Button("Start") { state.start(job) } }
-            if job.isActive { Button("Cancel Render") { state.cancel(job) } }
+            if job.isActive {
+                Button(job.paused == true ? "Resume" : "Pause") { state.setPaused(job, job.paused != true) }
+                Button("Cancel Render") { state.cancel(job) }
+            }
             if (job.files ?? 0) > 0 { Button("Download") { state.download(job) } }
             if state.downloaded[job.id] != nil { Button("Show in Finder") { state.reveal(job) } }
             if state.canRenderAgain(job) { Button("Render Again") { state.renderAgain(job) } }
@@ -594,7 +587,14 @@ struct JobRow: View {
                 .buttonStyle(.borderedProminent).controlSize(.small)
                 .disabled(job.held == true && state.heldPCIDs(job).isEmpty)
         } else if job.isActive {
-            Button("Cancel") { state.cancel(job) }.controlSize(.small)
+            HStack(spacing: 6) {
+                Button { state.setPaused(job, job.paused != true) } label: {
+                    Label(job.paused == true ? "Resume" : "Pause", systemImage: job.paused == true ? "play.fill" : "pause.fill")
+                }
+                .help(job.paused == true ? "Carry on from where it stopped" : "Freeze it where it is; Resume carries on from the same spot")
+                Button("Cancel") { state.cancel(job) }
+            }
+            .controlSize(.small)
         } else if state.canRenderAgain(job) && (job.files ?? 0) == 0 {
             Button { state.renderAgain(job) } label: { Label("Render Again", systemImage: "arrow.clockwise") }
                 .controlSize(.small)
@@ -652,9 +652,10 @@ struct JobRow: View {
     private var detail: String {
         switch job.state {
         case "rendering":
-            if job.paused == true { return "Paused · " + job.progressText }
+            if job.paused == true { return "Paused · " + (job.note ?? job.progressText) }
             return job.note ?? job.progressText
         case "queued":
+            if job.paused == true { return "Paused · it starts when you resume it" }
             return position == 1 ? "Starts next" : "Waiting · \(position ?? 0) in line"
         case "held":
             if job.held != true { return "Sent straight to \(state.pcName(of: job) ?? "the PC"); press Start to render it there" }

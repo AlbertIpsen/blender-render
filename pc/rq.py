@@ -26,9 +26,10 @@ JSON on stdout, except `send` which streams a tar of the job's output.
   rq off [--stop]            switch the PC off for rendering: nothing new starts; --stop also puts
                              the render in progress back in line
   rq on                      switch it back on
-  rq pause                   the Mac's Pause All: freeze the render in progress where it is and start
-                             nothing new (separate from `off`, which is the PC owner's switch)
-  rq resume                  carry on from the same frame and sample
+  rq pause [<id>]            freeze a job where it is (its `pause` flag; a queued one waits), or with
+                             no id everything: the render in progress, and nothing new starts
+                             (separate from `off`, which is the PC owner's switch)
+  rq resume [<id>]           carry on from the same frame and sample
   rq share on|off            let other BlenderRender computers send this one jobs (rqnet.py), or not
   rq restart-worker          restart the worker when nothing is rendering, so it runs this rq.py
   rq install-tray            put a new BlenderRenderPC.exe (sent as BlenderRenderPC.exe.new) in place,
@@ -64,7 +65,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = 16
+VERSION = 17
 HERE = Path(__file__).resolve().parent
 JOBS = HERE / "jobs"
 CACHE = HERE / "cache"
@@ -323,6 +324,8 @@ def cmd_list():
             if not job:
                 continue
             job.update(read_json(d / "status.json", {}))
+            if (d / "pause").exists():
+                job["paused"] = True  # a queued one too, though nothing is frozen yet
             job["id"] = d.name
             jobs.append(job)
     jobs.sort(key=lambda j: j.get("submitted", 0))
@@ -682,7 +685,7 @@ def render_job(d, cfg):
                     st.update(frame=frame, sample=s, samples=n, remaining=m.group(4),
                               progress=min(1.0, (done_frames + s / max(n, 1)) / frames),
                               eta=None if left is None else round(left), eta_at=now)
-            want = PAUSED.exists() and not (d / "cancel").exists()
+            want = (PAUSED.exists() or (d / "pause").exists()) and not (d / "cancel").exists()
             if want != frozen and proc.poll() is None:
                 try:
                     freeze(proc, want)
@@ -752,7 +755,7 @@ def cmd_worker():
         queued = []
         for d in JOBS.iterdir():
             st = read_json(d / "status.json", {})
-            if st.get("state") == "queued" and not (d / "cancel").exists():
+            if st.get("state") == "queued" and not (d / "cancel").exists() and not (d / "pause").exists():
                 queued.append((read_json(d / "job.json", {}).get("submitted", 0), d))
         if not queued:
             time.sleep(2)
@@ -813,6 +816,12 @@ def main():
         cmd_off("--stop" in rest)
     elif cmd == "on":
         cmd_on()
+    elif cmd == "pause" and rest:
+        (job_dir(rest[0]) / "pause").touch()
+        out({"paused": True})
+    elif cmd == "resume" and rest:
+        (job_dir(rest[0]) / "pause").unlink(missing_ok=True)
+        out({"paused": False, "worker": ensure_worker()})
     elif cmd == "pause":
         cmd_pause()
     elif cmd == "resume":

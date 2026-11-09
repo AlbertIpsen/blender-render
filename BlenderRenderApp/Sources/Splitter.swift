@@ -35,6 +35,8 @@ struct SplitState: Codable {
     var log: [String] = []
     /// Measured seconds per frame, by PC id; each PC's next batch is cut to fit.
     var speeds: [String: Double]?
+    /// Paused from its row: its batches are frozen on the PCs and no new ones go out.
+    var paused: Bool?
 
     var frameCount: Int { (end - start) / step + 1 }
     var framesDone: Int { batches.filter { $0.status == "done" }.reduce(0) { $0 + frames(in: $1) } }
@@ -136,6 +138,18 @@ final class SplitRun {
     }
 
     /// `source` says what asked for it (button, connector…), for the log: cancelled jobs lose their frames.
+    /// Freeze or thaw the batches it has on the PCs (a batch queued ahead too); while paused, no more go out.
+    func setPaused(_ on: Bool) {
+        guard running, (state.paused == true) != on else { return }
+        state.paused = on
+        note(on ? "Paused" : "Resumed")
+        for pc in state.pcs {
+            let rpc = rpc(pc), jobs = state.batches.filter { $0.pc == pc.id && $0.status == "running" }.compactMap(\.jobID)
+            Task { for job in jobs { if on { try? await rpc.pauseJob(job) } else { try? await rpc.resumeJob(job) } } }
+        }
+        changed()
+    }
+
     func cancel(source: String) {
         guard state.state == "rendering" else { return }
         state.state = "cancelled"
@@ -179,6 +193,7 @@ final class SplitRun {
         j.started = state.submitted
         j.ended = state.ended
         j.error = state.error
+        j.paused = state.paused
         j.files = state.files
         j.split = true
         let done = Double(state.framesDone) + batchProgress.reduce(0.0) { $0 + $1.value * Double(state.frames(in: state.batches[$1.key])) }
@@ -258,6 +273,14 @@ final class SplitRun {
         while running && !allDone && !Task.isCancelled {
             guard ahead != nil || state.batches.contains(where: { $0.status == "pending" }) else {
                 try? await Task.sleep(for: .seconds(3))  // another PC might still hand one back
+                continue
+            }
+            if state.paused == true, ahead == nil {  // its row's Pause: what's out stays frozen, nothing new goes
+                if activity[pc.id] != Self.paused {
+                    activity[pc.id] = Self.paused
+                    changed()
+                }
+                try? await Task.sleep(for: .seconds(3))
                 continue
             }
             guard ahead != nil || !workAhead(pc) else {  // a PC does one job at a time, in queue order; this one doesn't even need the file yet

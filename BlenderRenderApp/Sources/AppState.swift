@@ -109,6 +109,7 @@ final class AppState: ObservableObject {
         Notifier.shared.onAction = { [weak self] id, action in self?.handleNotification(job: id, action: action) }
         startPolling()
         discovery.start()
+        if pausedAll { setPausedAll(false) }  // Pause All is gone from the toolbar; jobs pause one by one now
         splits.restore(cfg: cfg)
         refreshJobs()
         Task { [weak self] in
@@ -450,6 +451,22 @@ final class AppState: ObservableObject {
         workerNudged[id] = Date()
         let rpc = RenderPC(cfg: cfg.config(for: pc))
         Task.detached { try? await rpc.ensureWorker() }
+    }
+
+    // MARK: Pause one job
+
+    func setPaused(_ job: PCJob, _ on: Bool) {
+        if job.split == true {
+            splits.run(job.id)?.setPaused(on)
+            refreshJobs()
+            return
+        }
+        let rpc = rpc(for: job)
+        Task {
+            do { if on { try await rpc.pauseJob(job.id) } else { try await rpc.resumeJob(job.id) } }
+            catch { alert = error.localizedDescription }
+            refreshSoon()
+        }
     }
 
     // MARK: Pause All
