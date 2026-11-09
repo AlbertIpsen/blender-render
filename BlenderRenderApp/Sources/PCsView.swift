@@ -29,7 +29,8 @@ struct PCCards: View {
         VStack(spacing: 12) {
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
-                       splitDone: state.splitDone(on: pc.id), speed: state.splitSpeed(on: pc.id))
+                       splitDone: state.splitDone(on: pc.id), speed: state.splitSpeed(on: pc.id),
+                       checking: state.checkingPCs.contains(pc.id)) { Task { await state.checkConnection(pc) } }
             }
             if !state.nearbyToAdd.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -52,6 +53,9 @@ struct PCCard: View {
     /// Batches and frames it has finished, by running split job (a batch's `parent`).
     let splitDone: [String: (batches: Int, frames: Int)]
     let speed: Double?
+    /// Check connection is running for it.
+    var checking = false
+    let check: () -> Void
 
     private var online: Bool { version != nil && live?.error == nil }
     private var active: [PCJob] {
@@ -107,7 +111,7 @@ struct PCCard: View {
     }
 
     private var status: String {
-        if !online { return live == nil ? "Checking…" : "Offline" }
+        if !online { return live == nil || checking ? "Checking…" : "Offline" }
         if live?.paused == true { return rendering ? "Paused mid-render" : "Paused" }
         if live?.off == true { return rendering ? "Rendering, switched off after this" : "Switched off on the PC" }
         if rendering { return "Rendering" }
@@ -141,6 +145,12 @@ struct PCCard: View {
             }
             Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            HStack(spacing: 8) {
+                Button(action: check) { Label("Check Connection", systemImage: "arrow.clockwise") }
+                    .disabled(checking)
+                if checking { ProgressView().controlSize(.small) }
+            }
+            .padding(.top, 6)
         }
     }
 

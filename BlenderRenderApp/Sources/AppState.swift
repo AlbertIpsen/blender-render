@@ -264,6 +264,37 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// PCs being checked by hand (Check connection), so their card can show it.
+    @Published private(set) var checkingPCs: Set<String> = []
+
+    /// Check connection: look at one PC again now, as at launch: reach it, give it the queue scripts
+    /// if they're missing or old, start its worker if it's stopped, and read what it's doing.
+    func checkConnection(_ pc: PCEntry) async {
+        guard !checkingPCs.contains(pc.id) else { return }
+        checkingPCs.insert(pc.id)
+        defer { checkingPCs.remove(pc.id) }
+        let rpc = RenderPC(cfg: cfg.config(for: pc))
+        do {
+            var v = try await rpc.connect()
+            if pc.id != "mac", !v.worker || v.agent == false {
+                try? await rpc.ensureWorker()
+                v = (try? await rpc.version()) ?? v
+            }
+            let list = try await rpc.list()
+            v.off = Self.isOff(list, pc)
+            pcVersions[pc.id] = v
+            pcLive[pc.id] = PCLive(jobs: list.jobs, stats: try? await rpc.stats(), seen: Date(), off: list.off == true,
+                                   paused: list.paused == true)
+        } catch {
+            pcVersions[pc.id] = nil
+            var live = PCLive(error: error.localizedDescription)
+            live.seen = pcLive[pc.id]?.seen
+            live.stats = pcLive[pc.id]?.stats
+            pcLive[pc.id] = live
+        }
+        refreshJobs()
+    }
+
     /// For each running split job (by its id, a batch's `parent`): the batches this PC has finished
     /// and the frames in them.
     func splitDone(on id: String) -> [String: (batches: Int, frames: Int)] {
