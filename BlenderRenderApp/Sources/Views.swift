@@ -41,11 +41,6 @@ struct ContentView: View {
                     .help("Allow this computer to do render jobs: other Macs with BlenderRender on this network can render on this Mac's GPU")
                 }
                 ToolbarItem(placement: .automatic) {
-                    Toggle(isOn: $showPCs) { Label("Render PCs", systemImage: "sidebar.right") }
-                        .help(showPCs ? "Hide the render PCs" : "Show what each render PC is doing")
-                        .disabled(!state.cfg.isConfigured)
-                }
-                ToolbarItem(placement: .automatic) {
                     Button { state.setPausedAll(!state.pausedAll) } label: {
                         Label(state.pausedAll ? "Resume All" : "Pause All",
                               systemImage: state.pausedAll ? "play.fill" : "pause.fill")
@@ -59,6 +54,11 @@ struct ContentView: View {
                     Button { picking.value = true } label: { Label("Add Files", systemImage: "plus") }
                         .labelStyle(.titleAndIcon)
                         .help("Add .blend files to the render queue")
+                        .disabled(!state.cfg.isConfigured)
+                }
+                ToolbarItem(placement: .primaryAction) {  // last, at the far right, above the panel it opens
+                    Toggle(isOn: $showPCs) { Label("Render PCs", systemImage: "sidebar.right") }
+                        .help(showPCs ? "Hide the render PCs" : "Show what each render PC is doing")
                         .disabled(!state.cfg.isConfigured)
                 }
             }
