@@ -366,6 +366,34 @@ final class AppState: ObservableObject {
     func isOff(_ id: String) -> Bool { pcVersions[id]?.off == true }
 
     /// Which PC a job is on, for the row; nil while there's only one PC.
+    /// What a job in Up Next is waiting for. Each PC renders its own line of jobs: a job on one PC never
+    /// waits for a job on another.
+    func waitNote(_ job: PCJob) -> String {
+        guard job.split != true, let id = job.pc, let pc = cfg.allPCs.first(where: { $0.id == id }) else {
+            return "Starts when its PCs are free"
+        }
+        let name = pcName(pc)
+        let mine = jobs.filter { $0.pc == id && $0.split != true }
+        let ahead = mine.filter { $0.state == "queued" && $0.paused != true }.prefix { $0.id != job.id }
+        if pcVersions[id] == nil { return "Waiting · \(name) is offline" }
+        if workerStopped.contains(id) {
+            return id == "mac" ? "Waiting · this Mac's render worker is stopped"
+                : "Not starting · \(name)'s render worker isn't running. Sign in on \(name) (BlenderRender PC starts it)"
+        }
+        if let now = mine.first(where: { $0.state == "rendering" }) {
+            return ahead.isEmpty ? "Starts on \(name) after \(now.displayName)"
+                : "Waiting on \(name) · \(ahead.count + 1) job\(ahead.count == 0 ? "" : "s") ahead of it there"
+        }
+        if pcVersions[id]?.off == true { return "Waiting · rendering is switched off on \(name)" }
+        return ahead.isEmpty ? "Starting on \(name)…" : "Waiting on \(name) · \(ahead.count) ahead of it there"
+    }
+
+    /// Queued on a PC that can't start it: offline, or its worker isn't running.
+    func isStuck(_ job: PCJob) -> Bool {
+        guard job.state == "queued", job.split != true, let id = job.pc else { return false }
+        return pcVersions[id] == nil || workerStopped.contains(id)
+    }
+
     func pcName(of job: PCJob) -> String? {
         guard cfg.allPCs.count > 1, let id = job.pc, let pc = cfg.allPCs.first(where: { $0.id == id }) else { return nil }
         return pcName(pc)
@@ -474,9 +502,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// PCs whose worker isn't running: their queued jobs can't start (on Windows, usually no one is signed in).
+    @Published private(set) var workerStopped: Set<String> = []
+
     /// A PC's worker stopped (it also keeps rqnet.py running): start it, at most every 2 minutes.
     private var workerNudged: [String: Date] = [:]
     private func keepWorker(_ id: String, _ list: PCList) {
+        if list.worker || id == "mac" { workerStopped.remove(id) } else { workerStopped.insert(id) }
         guard !list.worker, id != "mac", Date().timeIntervalSince(workerNudged[id] ?? .distantPast) > 120,
               let pc = cfg.allPCs.first(where: { $0.id == id }) else { return }
         workerNudged[id] = Date()

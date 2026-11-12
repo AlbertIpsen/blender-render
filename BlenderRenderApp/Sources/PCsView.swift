@@ -30,7 +30,7 @@ struct PCCards: View {
             ForEach(state.cfg.allPCs) { pc in
                 PCCard(pc: pc, version: state.pcVersions[pc.id], live: state.pcLive[pc.id],
                        splitDone: state.splitDone(on: pc.id), speed: state.splitSpeed(on: pc.id),
-                       checking: state.checkingPCs.contains(pc.id)) { Task { await state.checkConnection(pc) } }
+                       checking: state.checkingPCs.contains(pc.id), workerStopped: state.workerStopped.contains(pc.id)) { Task { await state.checkConnection(pc) } }
             }
             if !state.nearbyToAdd.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -55,6 +55,8 @@ struct PCCard: View {
     let speed: Double?
     /// Check connection is running for it.
     var checking = false
+    /// Its worker isn't running, so nothing it's given starts (on Windows: no one is signed in).
+    var workerStopped = false
     let check: () -> Void
 
     private var online: Bool { version != nil && live?.error == nil }
@@ -106,7 +108,7 @@ struct PCCard: View {
 
     private var color: Color {
         if !online { return live == nil && version == nil ? .yellow : .red }
-        if live?.paused == true || (live?.off == true && !rendering) { return .orange }
+        if live?.paused == true || (live?.off == true && !rendering) || (workerStopped && !rendering) { return .orange }
         return rendering ? .accentColor : .green
     }
 
@@ -115,6 +117,7 @@ struct PCCard: View {
         if live?.paused == true { return rendering ? "Paused mid-render" : "Paused" }
         if live?.off == true { return rendering ? "Rendering, switched off after this" : "Switched off on the PC" }
         if rendering { return "Rendering" }
+        if workerStopped { return "Not rendering: sign in on this PC" }
         return active.isEmpty ? "Ready" : "Starting…"
     }
 

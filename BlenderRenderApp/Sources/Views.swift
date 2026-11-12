@@ -375,7 +375,9 @@ struct JobList: View {
                 }
                 ForEach(Array(jobs.enumerated()), id: \.element.id) { i, job in
                     if i > 0 || !uploads.isEmpty { Divider().padding(.leading, 50) }
-                    JobRow(job: job, position: numbered ? i + 1 : nil, logJob: $logJob)
+                    // Numbered in its own PC's line: jobs on different PCs render at the same time.
+                    JobRow(job: job, position: numbered ? jobs[...i].filter { $0.pc == job.pc && $0.split == job.split }.count : nil,
+                           logJob: $logJob)
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -509,7 +511,7 @@ struct JobRow: View {
                     }
                 }
                 Text(detail).font(.callout).monospacedDigit()
-                    .foregroundStyle(job.state == "failed" ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(job.state == "failed" || state.isStuck(job) ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                     .lineLimit(2)
                 if let t = state.downloads[job.id] { DownloadProgress(transfer: t) }
                 if choosesPCs { pcSwitches.padding(.top, 4) }
@@ -656,7 +658,7 @@ struct JobRow: View {
             return job.note ?? job.progressText
         case "queued":
             if job.paused == true { return "Paused · it starts when you resume it" }
-            return position == 1 ? "Starts next" : "Waiting · \(position ?? 0) in line"
+            return state.waitNote(job)
         case "held":
             if job.held != true { return "Sent straight to \(state.pcName(of: job) ?? "the PC"); press Start to render it there" }
             let names = state.cfg.allPCs.filter { state.heldPCIDs(job).contains($0.id) }.map(state.pcName)
